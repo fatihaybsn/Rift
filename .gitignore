@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff
+.ruff_cache/
+
+# MyPy / type check caches
+.mypy_cache/
+.pyre/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local databases / temp artifacts
+*.db
+*.sqlite3
+tmp/
+.temp/
+
+# Logs
+*.log
+logs/
+
+# Alembic / migration leftovers if generated locally
+alembic.ini
+
+# Docker overrides
+docker-compose.override.yml
