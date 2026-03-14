@@ -108,6 +108,18 @@ More detail will be added in `docs/architecture.md`.
 - OpenTelemetry
 - GitHub Actions
 
+## Database migrations (current scaffold)
+
+Persistence schema migrations are managed with Alembic.
+
+```bash
+alembic upgrade head
+alembic downgrade base
+```
+
+Migration tests use a real PostgreSQL database URL from `TEST_POSTGRES_DATABASE_URL`.
+For safety, the database name must include `test`.
+
 ## Repository status
 
 Current status: **pre-MVP / active build**

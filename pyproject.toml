@@ -9,7 +9,7 @@ description = "A backend service that compares OpenAPI specs, detects changes, c
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    { name = "Fatih Ayibasan" }
+    { name = "Fatih Ayıbasan" }
 ]
 dependencies = [
     "fastapi>=0.115,<1.0",

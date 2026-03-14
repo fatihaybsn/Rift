@@ -49,8 +49,5 @@ tmp/
 *.log
 logs/
 
-# Alembic / migration leftovers if generated locally
-alembic.ini
-
 # Docker overrides
 docker-compose.override.yml
