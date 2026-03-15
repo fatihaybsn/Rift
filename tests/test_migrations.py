@@ -110,4 +110,3 @@ def test_downgrade_base_drops_expected_tables(monkeypatch: pytest.MonkeyPatch) -
     engine.dispose()
 
     assert EXPECTED_TABLES.isdisjoint(discovered_tables)
-

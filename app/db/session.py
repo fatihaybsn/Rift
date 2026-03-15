@@ -45,4 +45,3 @@ def reset_db_session_state() -> None:
         get_engine().dispose()
     get_session_factory.cache_clear()
     get_engine.cache_clear()
-

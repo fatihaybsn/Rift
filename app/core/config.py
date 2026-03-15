@@ -1,5 +1,3 @@
-
-
 from functools import lru_cache
 from typing import Literal
 
@@ -36,7 +34,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql+psycopg://postgres:postgres@localhost:5432/api_change_radar",
+        default="postgresql+psycopg://localhost:5432/api_change_radar",
         description="SQLAlchemy database URL",
     )
     database_echo: bool = Field(default=False, description="Enable SQLAlchemy SQL echo logging")

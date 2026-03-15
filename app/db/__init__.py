@@ -28,4 +28,3 @@ __all__ = [
     "get_session_factory",
     "reset_db_session_state",
 ]
-

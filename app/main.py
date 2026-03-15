@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health_router
 from app.api.v1 import v1_router
@@ -10,11 +11,9 @@ from app.middleware import RequestIdMiddleware
 
 logger = get_logger(__name__)
 
-"""App nesnesini doğrudan tek satırla kurmak yerine fonksiyon içinde kurdum. Bu test ve config override için daha temizdir."""
-def create_app(settings: Settings | None = None) -> FastAPI: """FastAPI application kuruldu."""
-    
-    from fastapi.middleware.cors import CORSMiddleware
 
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Create and configure the FastAPI application."""
     # Load configuration
     settings = settings or Settings()
 
@@ -69,4 +68,4 @@ def create_app(settings: Settings | None = None) -> FastAPI: """FastAPI applicat
 
 
 # Create the app instance for development servers (e.g., uvicorn app.main:app)
-app = create_app() """Gerçek uygulama nesnesi oluşturuldu"""
+app = create_app()

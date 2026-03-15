@@ -234,4 +234,3 @@ def downgrade() -> None:
     op.drop_table("spec_artifacts")
 
     op.drop_table("analysis_runs")
-

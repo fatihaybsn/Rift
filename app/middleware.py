@@ -13,16 +13,16 @@ from starlette.responses import Response
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """RequestIdMiddleware
 
-    Bu sınıf her request için şunu yapıyor:
-    request header’da X-Request-ID var mı bakıyor
-    varsa onu kullanıyor
-    yoksa uuid.uuid4() ile yeni ID üretiyor
-    bunu request.state.request_id içine koyuyor
-    response header’a da aynı ID’yi geri yazıyor
+        Bu sınıf her request için şunu yapıyor:
+        request header’da X-Request-ID var mı bakıyor
+        varsa onu kullanıyor
+        yoksa uuid.uuid4() ile yeni ID üretiyor
+        bunu request.state.request_id içine koyuyor
+        response header’a da aynı ID’yi geri yazıyor
 
 
-Bu sayede loglarda ve istemci tarafında aynı isteği takip edebiliriz.
-Özellikle production debugging için çok değerlidir.
+    Bu sayede loglarda ve istemci tarafında aynı isteği takip edebiliriz.
+    Özellikle production debugging için çok değerlidir.
     """
 
     def __init__(self, app, header_name: str = "X-Request-ID"):

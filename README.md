@@ -108,6 +108,18 @@ More detail will be added in `docs/architecture.md`.
 - OpenTelemetry
 - GitHub Actions
 
+## Local database configuration
+
+Create a local `.env` from the template and set your PostgreSQL role/password:
+
+```bash
+cp .env.example .env
+```
+
+`DATABASE_URL` must point to a role that exists in your local PostgreSQL instance.
+If you see `FATAL: role "postgres" does not exist`, replace `postgres` in the URL
+with your local PostgreSQL role.
+
 ## Database migrations (current scaffold)
 
 Persistence schema migrations are managed with Alembic.
