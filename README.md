@@ -79,6 +79,9 @@ The service is expected to contain these main parts:
 
 - **Normalizer**  
   Converts both specs into a canonical internal representation.
+  For MVP determinism, canonical output intentionally excludes `servers`.
+  Parameter serialization controls (`style`, `explode`) are deferred: only
+  default semantics are accepted, non-default values fail loudly.
 
 - **Diff Engine**  
   Computes structured, deterministic findings.

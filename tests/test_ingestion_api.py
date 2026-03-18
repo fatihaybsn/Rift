@@ -15,7 +15,14 @@ from sqlalchemy.engine import URL, make_url
 from alembic import command
 from app.api.v1.runs import MAX_CHANGELOG_TEXT_BYTES, MAX_SPEC_BYTES
 from app.core.config import Settings, get_settings
-from app.db import AnalysisRun, ArtifactKind, SpecArtifact, get_db_session
+from app.db import (
+    AnalysisRun,
+    ArtifactKind,
+    NormalizedSnapshot,
+    SnapshotKind,
+    SpecArtifact,
+    get_db_session,
+)
 from app.db.session import reset_db_session_state
 from app.main import create_app
 
@@ -132,14 +139,52 @@ def test_create_analysis_run_happy_path_persists_expected_artifacts_with_fake_se
 
     run_records = [obj for obj in fake_session.added if isinstance(obj, AnalysisRun)]
     artifact_records = [obj for obj in fake_session.added if isinstance(obj, SpecArtifact)]
+    snapshot_records = [obj for obj in fake_session.added if isinstance(obj, NormalizedSnapshot)]
 
     assert len(run_records) == 1
     assert len(artifact_records) == 3
+    assert len(snapshot_records) == 2
     assert [artifact.kind for artifact in artifact_records] == [
         ArtifactKind.OLD_SPEC,
         ArtifactKind.NEW_SPEC,
         ArtifactKind.CHANGELOG_TEXT,
     ]
+    assert [snapshot.kind for snapshot in snapshot_records] == [SnapshotKind.OLD, SnapshotKind.NEW]
+
+
+def test_create_analysis_run_rejects_invalid_json_or_yaml_spec_content() -> None:
+    fake_session = FakeSession()
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.post(
+            f"{Settings().api_prefix}/runs",
+            files=[
+                ("specs", ("old.json", b'{"openapi":', "application/json")),
+                ("specs", ("new.yaml", _build_valid_spec_yaml("New API"), "application/yaml")),
+            ],
+        )
+
+    assert response.status_code == 422
+    assert "invalid JSON/YAML input" in response.json()["detail"]
+    assert fake_session.committed is False
+    assert fake_session.rolled_back is True
+
+
+def test_create_analysis_run_rejects_invalid_openapi_spec_structure() -> None:
+    fake_session = FakeSession()
+    invalid_openapi = b'{"openapi":"3.0.3","paths":{}}'
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.post(
+            f"{Settings().api_prefix}/runs",
+            files=[
+                ("specs", ("old.json", invalid_openapi, "application/json")),
+                ("specs", ("new.yaml", _build_valid_spec_yaml("New API"), "application/yaml")),
+            ],
+        )
+
+    assert response.status_code == 422
+    assert "invalid OpenAPI document" in response.json()["detail"]
+    assert fake_session.committed is False
+    assert fake_session.rolled_back is True
 
 
 def test_create_analysis_run_rejects_when_spec_count_is_not_exactly_two() -> None:
@@ -280,6 +325,22 @@ def test_create_analysis_run_integration_persists_run_and_artifacts(
                     .mappings()
                     .all()
                 )
+
+                snapshot_rows = (
+                    connection.execute(
+                        sa.text(
+                            """
+                        SELECT kind, schema_version, checksum, source_artifact_id
+                        FROM normalized_snapshots
+                        WHERE run_id = :run_id
+                        ORDER BY kind
+                        """
+                        ),
+                        {"run_id": run_id},
+                    )
+                    .mappings()
+                    .all()
+                )
         finally:
             engine.dispose()
 
@@ -291,6 +352,13 @@ def test_create_analysis_run_integration_persists_run_and_artifacts(
             "new_spec",
             "old_spec",
         ]
+        assert len(snapshot_rows) == 2
+        assert [row["kind"] for row in snapshot_rows] == ["new", "old"]
+        assert all(row["schema_version"] == "v1" for row in snapshot_rows)
+        assert all(
+            isinstance(row["checksum"], str) and len(row["checksum"]) == 64 for row in snapshot_rows
+        )
+        assert all(row["source_artifact_id"] is not None for row in snapshot_rows)
     finally:
         command.downgrade(alembic_config, "base")
         reset_db_session_state()

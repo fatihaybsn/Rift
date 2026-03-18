@@ -11,7 +11,15 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db import AnalysisRun, ArtifactKind, SpecArtifact, get_db_session
+from app.core.openapi_processing import OpenAPIProcessingError, parse_validate_and_normalize_openapi
+from app.db import (
+    AnalysisRun,
+    ArtifactKind,
+    NormalizedSnapshot,
+    SnapshotKind,
+    SpecArtifact,
+    get_db_session,
+)
 
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -132,6 +140,7 @@ async def create_analysis_run(
         status="pending",
     )
     db.add(run)
+    persisted_spec_artifacts: dict[ArtifactKind, SpecArtifact] = {}
 
     try:
         spec_kinds = (ArtifactKind.OLD_SPEC, ArtifactKind.NEW_SPEC)
@@ -143,23 +152,55 @@ async def create_analysis_run(
                 field_name=artifact_kind.value,
             )
 
-            db.add(
-                SpecArtifact(
-                    run_id=run.id,
-                    kind=artifact_kind,
-                    filename=upload_file.filename,
-                    media_type=media_type,
-                    sha256=sha256,
-                    byte_size=byte_size,
-                    payload_bytes=payload_bytes,
-                    payload_text=None,
-                )
+            spec_artifact = SpecArtifact(
+                run_id=run.id,
+                kind=artifact_kind,
+                filename=upload_file.filename,
+                media_type=media_type,
+                sha256=sha256,
+                byte_size=byte_size,
+                payload_bytes=payload_bytes,
+                payload_text=None,
             )
+            db.add(spec_artifact)
+            persisted_spec_artifacts[artifact_kind] = spec_artifact
 
         if changelog_text is not None:
             db.add(_build_text_artifact(run.id, changelog_text))
 
+        for artifact_kind, snapshot_kind in (
+            (ArtifactKind.OLD_SPEC, SnapshotKind.OLD),
+            (ArtifactKind.NEW_SPEC, SnapshotKind.NEW),
+        ):
+            source_artifact = persisted_spec_artifacts[artifact_kind]
+            if source_artifact.payload_bytes is None:
+                raise OpenAPIProcessingError(
+                    f"artifact {artifact_kind.value} does not contain bytes payload."
+                )
+
+            normalized_snapshot = parse_validate_and_normalize_openapi(
+                source_artifact.payload_bytes,
+                source=artifact_kind.value,
+            )
+            canonical_payload = normalized_snapshot.to_dict()
+            db.add(
+                NormalizedSnapshot(
+                    run_id=run.id,
+                    source_artifact=source_artifact,
+                    kind=snapshot_kind,
+                    schema_version=normalized_snapshot.schema_version,
+                    content_json=canonical_payload,
+                    checksum=normalized_snapshot.checksum(),
+                )
+            )
+
         db.commit()
+    except OpenAPIProcessingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     except HTTPException:
         db.rollback()
         raise
