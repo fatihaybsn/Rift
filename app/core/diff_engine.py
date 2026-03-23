@@ -122,8 +122,13 @@ class DiffFinding:
 
     category: FindingCategory
     code: FindingCode
-    location_marker: LocationMarker
+    path: str | None
+    method: str | None
     location: str
+    entity_path: str | None
+    field_path: str | None
+    location_marker: LocationMarker
+    locator: str
     compatibility: CompatibilityClassification
     confidence: ConfidenceLevel
     before: Any | None
@@ -135,8 +140,13 @@ class DiffFinding:
         return {
             "category": self.category.value,
             "code": self.code.value,
-            "location_marker": self.location_marker.value,
+            "path": self.path,
+            "method": self.method,
             "location": self.location,
+            "entity_path": self.entity_path,
+            "field_path": self.field_path,
+            "location_marker": self.location_marker.value,
+            "locator": self.locator,
             "compatibility": self.compatibility.value,
             "confidence": self.confidence.value,
             "before": _to_primitive(self.before),
@@ -150,6 +160,15 @@ class _SchemaDiffContext:
     side: SchemaSide
     base_location: str
     pointer: str
+
+
+@dataclass(frozen=True)
+class _LocationMetadata:
+    path: str | None
+    method: str | None
+    location: str
+    entity_path: str | None
+    field_path: str | None
 
 
 def diff_canonical_snapshots(
@@ -988,6 +1007,7 @@ def _append_finding(
     before: Any | None,
     after: Any | None,
 ) -> None:
+    metadata = _build_location_metadata(location_marker=location_marker, locator=location)
     sort_key = "|".join(
         (
             category.value,
@@ -1002,14 +1022,59 @@ def _append_finding(
         DiffFinding(
             category=category,
             code=code,
+            path=metadata.path,
+            method=metadata.method,
+            location=metadata.location,
+            entity_path=metadata.entity_path,
+            field_path=metadata.field_path,
             location_marker=location_marker,
-            location=location,
+            locator=location,
             compatibility=compatibility,
             confidence=confidence,
             before=_to_primitive(before),
             after=_to_primitive(after),
             sort_key=sort_key,
         )
+    )
+
+
+def _build_location_metadata(*, location_marker: LocationMarker, locator: str) -> _LocationMetadata:
+    base_locator = locator
+    field_path: str | None = None
+
+    if "#/" in locator:
+        field_index = locator.index("#/")
+        base_locator = locator[:field_index]
+        field_path = locator[field_index + 1 :]
+    elif locator.endswith("#"):
+        base_locator = locator[:-1]
+        field_path = "/"
+
+    prefix, separator, remainder = base_locator.partition(":")
+    entity_path = base_locator
+    if separator:
+        entity_path = remainder
+
+    path: str | None = None
+    method: str | None = None
+    if prefix == "path":
+        path = remainder or None
+    else:
+        method_pattern = "|".join(HTTP_METHODS)
+        match = re.match(
+            rf"^(?P<path>/[^#]*)#(?P<method>{method_pattern})(?:#|$)",
+            remainder if separator else base_locator,
+        )
+        if match:
+            path = match.group("path")
+            method = match.group("method")
+
+    return _LocationMetadata(
+        path=path,
+        method=method,
+        location=location_marker.value,
+        entity_path=entity_path or None,
+        field_path=field_path,
     )
 
 

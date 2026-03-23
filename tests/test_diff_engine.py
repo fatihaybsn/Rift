@@ -177,12 +177,14 @@ def test_readonly_writeonly_directionality_changes_are_explicit() -> None:
     old_snapshot, new_snapshot = build_request_change_snapshots()
     findings = diff_canonical_snapshots(old_snapshot, new_snapshot)
     request_effect = _find_one(findings, FindingCode.REQUEST_READ_WRITE_EFFECT_CHANGED)
-    assert request_effect.location.startswith("request:")
+    assert request_effect.location == "request"
+    assert request_effect.locator.startswith("request:")
 
     old_snapshot, new_snapshot = build_response_change_snapshots()
     findings = diff_canonical_snapshots(old_snapshot, new_snapshot)
     response_effect = _find_one(findings, FindingCode.RESPONSE_READ_WRITE_EFFECT_CHANGED)
-    assert response_effect.location.startswith("response:")
+    assert response_effect.location == "response"
+    assert response_effect.locator.startswith("response:")
 
 
 def test_machine_readable_fields_and_typed_category_are_present() -> None:
@@ -192,9 +194,16 @@ def test_machine_readable_fields_and_typed_category_are_present() -> None:
     payload = finding.to_dict()
 
     assert isinstance(finding.category, FindingCategory)
+    assert "path" in payload
+    assert "method" in payload
+    assert "location" in payload
+    assert "entity_path" in payload
+    assert "field_path" in payload
     assert "before" in payload
     assert "after" in payload
     assert payload["location_marker"] in {"operation", "parameter", "request", "response", "auth"}
+    assert payload["location"] in {"operation", "parameter", "request", "response", "auth"}
+    assert "locator" in payload
     assert payload["compatibility"] in {
         "breaking",
         "potentially_breaking",
@@ -203,6 +212,38 @@ def test_machine_readable_fields_and_typed_category_are_present() -> None:
     }
     assert payload["confidence"] in {"high", "medium", "low"}
     assert payload["sort_key"] == finding.sort_key
+
+
+def test_finding_model_parses_path_method_entity_and_field_paths() -> None:
+    old_snapshot, new_snapshot = build_request_change_snapshots()
+    findings = diff_canonical_snapshots(old_snapshot, new_snapshot)
+
+    media_removed = _find_one(findings, FindingCode.REQUEST_MEDIA_TYPE_REMOVED)
+    assert media_removed.path == "/users"
+    assert media_removed.method == "post"
+    assert media_removed.location == "request"
+    assert media_removed.entity_path == "/users#post#application/xml"
+    assert media_removed.field_path is None
+
+    field_changed = _find_one(findings, FindingCode.REQUEST_FIELD_TYPE_CHANGED)
+    assert field_changed.path == "/users"
+    assert field_changed.method == "post"
+    assert field_changed.location == "request"
+    assert field_changed.entity_path is not None
+    assert field_changed.field_path is not None
+    assert field_changed.field_path.startswith("/properties/")
+
+
+def test_path_level_finding_exposes_path_without_method() -> None:
+    old_snapshot, new_snapshot = build_operation_surface_snapshots()
+    findings = diff_canonical_snapshots(old_snapshot, new_snapshot)
+    path_added = _find_one(findings, FindingCode.PATH_ADDED)
+
+    assert path_added.path == "/teams"
+    assert path_added.method is None
+    assert path_added.location == "operation"
+    assert path_added.entity_path == "/teams"
+    assert path_added.field_path is None
 
 
 def test_compatibility_classification_examples() -> None:
@@ -215,6 +256,28 @@ def test_compatibility_classification_examples() -> None:
     findings = diff_canonical_snapshots(old_snapshot, new_snapshot)
     removed_method = _find_one(findings, FindingCode.METHOD_REMOVED)
     assert removed_method.compatibility is CompatibilityClassification.BREAKING
+
+
+def test_byte_stable_serialization_for_same_inputs() -> None:
+    import json
+
+    old_snapshot, new_snapshot = build_response_change_snapshots()
+    findings_a = diff_canonical_snapshots(old_snapshot, new_snapshot)
+    findings_b = diff_canonical_snapshots(old_snapshot, new_snapshot)
+
+    serialized_a = json.dumps(
+        [item.to_dict() for item in findings_a],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    serialized_b = json.dumps(
+        [item.to_dict() for item in findings_b],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    assert serialized_a == serialized_b
 
 
 def test_diff_fails_on_schema_version_mismatch() -> None:
@@ -374,4 +437,35 @@ def test_diff_fails_on_duplicate_response_media_type_keys() -> None:
     )
 
     with pytest.raises(DiffEngineError, match="duplicate response media type"):
+        diff_canonical_snapshots(mutated_old, new_snapshot)
+
+
+def test_diff_fails_on_duplicate_request_media_type_keys() -> None:
+    old_snapshot, new_snapshot = build_request_change_snapshots()
+    operation = old_snapshot.operations[0]
+    media = operation.request_body.media_types[0]
+    mutated_request_body = CanonicalRequestBody(
+        present=operation.request_body.present,
+        required=operation.request_body.required,
+        media_types=(media, media),
+    )
+    mutated_operation = CanonicalOperation(
+        path=operation.path,
+        method=operation.method,
+        operation_id=operation.operation_id,
+        deprecated=operation.deprecated,
+        parameters=operation.parameters,
+        request_body=mutated_request_body,
+        responses=operation.responses,
+        security_override=operation.security_override,
+    )
+    mutated_old = CanonicalOpenAPISnapshot(
+        schema_version=old_snapshot.schema_version,
+        openapi_version=old_snapshot.openapi_version,
+        top_level_security=old_snapshot.top_level_security,
+        security_schemes=old_snapshot.security_schemes,
+        operations=(mutated_operation,),
+    )
+
+    with pytest.raises(DiffEngineError, match="duplicate request media type"):
         diff_canonical_snapshots(mutated_old, new_snapshot)
