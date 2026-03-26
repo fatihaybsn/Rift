@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.db import (
     AnalysisRun,
     ArtifactKind,
+    AuditLog,
     DeterministicFinding,
     NormalizedSnapshot,
     RunStatus,
@@ -30,6 +31,7 @@ from app.db import (
 from app.db.session import reset_db_session_state
 from app.services.run_orchestration import (
     InProcessRunExecutor,
+    PipelineStage,
     RunAlreadyCompletedError,
     RunAlreadyProcessingError,
     RunOrchestrationService,
@@ -253,12 +255,52 @@ def test_orchestration_success_path_persists_findings_and_completes_run(integrat
             .scalars()
             .all()
         )
+        audit_rows = (
+            session.execute(select(AuditLog).where(AuditLog.run_id == run_id)).scalars().all()
+        )
 
         assert snapshot_count == 2
         assert len(finding_rows) > 0
         assert [row.finding_order for row in finding_rows] == list(range(1, len(finding_rows) + 1))
         assert all(row.severity in {"low", "medium", "high"} for row in finding_rows)
         assert all(row.detail for row in finding_rows)
+
+        stage_events = sorted(
+            [row.payload_json for row in audit_rows if row.event_type == "run_stage_transition"],
+            key=lambda payload: payload["event_index"],
+        )
+        status_events = sorted(
+            [row.payload_json for row in audit_rows if row.event_type == "run_status_transition"],
+            key=lambda payload: payload["event_index"],
+        )
+        expected_stage_order = [
+            PipelineStage.LOAD_ARTIFACTS.value,
+            PipelineStage.PARSE_SPEC_OLD.value,
+            PipelineStage.PARSE_SPEC_NEW.value,
+            PipelineStage.VALIDATE_SPEC_OLD.value,
+            PipelineStage.VALIDATE_SPEC_NEW.value,
+            PipelineStage.NORMALIZE_OLD.value,
+            PipelineStage.NORMALIZE_NEW.value,
+            PipelineStage.COMPUTE_DIFF.value,
+            PipelineStage.APPLY_SEVERITY.value,
+            PipelineStage.PERSIST_RESULTS.value,
+        ]
+        expected_stage_transitions = [
+            item
+            for stage in expected_stage_order
+            for item in ((stage, "started"), (stage, "succeeded"))
+        ]
+
+        assert len(status_events) == 2
+        assert status_events[0]["from_status"] == RunStatus.PENDING.value
+        assert status_events[0]["to_status"] == RunStatus.PROCESSING.value
+        assert status_events[1]["from_status"] == RunStatus.PROCESSING.value
+        assert status_events[1]["to_status"] == RunStatus.COMPLETED.value
+        observed_stage_transitions = [
+            (item["stage"], item["transition"]) for item in stage_events
+        ]
+        assert observed_stage_transitions == expected_stage_transitions
+        assert all(item["attempt_count"] == 1 for item in stage_events)
     finally:
         session.close()
 
@@ -287,6 +329,9 @@ def test_orchestration_invalid_spec_records_failure_stage_and_error_code(integra
     session = integration_db()
     try:
         failed_run = session.get(AnalysisRun, run_id)
+        audit_rows = (
+            session.execute(select(AuditLog).where(AuditLog.run_id == run_id)).scalars().all()
+        )
         assert failed_run is not None
         assert failed_run.status == RunStatus.FAILED.value
         assert failed_run.failed_at is not None
@@ -294,6 +339,30 @@ def test_orchestration_invalid_spec_records_failure_stage_and_error_code(integra
         assert failed_run.failure_stage == "parse_spec_old"
         assert failed_run.error_code == "openapi_parse_error"
         assert failed_run.attempt_count == 1
+
+        stage_events = sorted(
+            [row.payload_json for row in audit_rows if row.event_type == "run_stage_transition"],
+            key=lambda payload: payload["event_index"],
+        )
+        status_events = sorted(
+            [row.payload_json for row in audit_rows if row.event_type == "run_status_transition"],
+            key=lambda payload: payload["event_index"],
+        )
+
+        assert len(status_events) == 2
+        assert status_events[0]["from_status"] == RunStatus.PENDING.value
+        assert status_events[0]["to_status"] == RunStatus.PROCESSING.value
+        assert status_events[1]["from_status"] == RunStatus.PROCESSING.value
+        assert status_events[1]["to_status"] == RunStatus.FAILED.value
+        assert status_events[1]["failure_stage"] == PipelineStage.PARSE_SPEC_OLD.value
+        assert status_events[1]["error_code"] == "openapi_parse_error"
+        assert [(item["stage"], item["transition"]) for item in stage_events] == [
+            (PipelineStage.LOAD_ARTIFACTS.value, "started"),
+            (PipelineStage.LOAD_ARTIFACTS.value, "succeeded"),
+            (PipelineStage.PARSE_SPEC_OLD.value, "started"),
+            (PipelineStage.PARSE_SPEC_OLD.value, "failed"),
+        ]
+        assert stage_events[-1]["error_code"] == "openapi_parse_error"
     finally:
         session.close()
 

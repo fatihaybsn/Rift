@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.diff_engine import diff_canonical_snapshots
 from app.core.openapi_processing import (
+    CanonicalOpenAPISnapshot,
     OpenAPIProcessingError,
     normalize_openapi_document,
     parse_openapi_document,
@@ -23,6 +25,7 @@ from app.core.severity_engine import ClassifiedFinding, classify_findings
 from app.db import (
     AnalysisRun,
     ArtifactKind,
+    AuditLog,
     DeterministicFinding,
     NormalizedSnapshot,
     RunStatus,
@@ -75,14 +78,22 @@ class RunStageExecutionError(RunOrchestrationError):
         self.error_code = error_code
 
 
+class StageTransitionType(StrEnum):
+    """Typed stage transition names for audit events."""
+
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class ExecutionPayload:
     """Executor output passed to persistence stage."""
 
     old_artifact: SpecArtifact
     new_artifact: SpecArtifact
-    old_snapshot: object
-    new_snapshot: object
+    old_snapshot: CanonicalOpenAPISnapshot
+    new_snapshot: CanonicalOpenAPISnapshot
     classified_findings: tuple[ClassifiedFinding, ...]
 
 
@@ -93,8 +104,31 @@ class RunExecutor(Protocol):
         """Execute deterministic stages up to persisted payload generation."""
 
 
+StageEventCallback = Callable[
+    [PipelineStage, StageTransitionType, str | None, str | None],
+    None,
+]
+
+
+@dataclass(frozen=True)
+class StageTransitionEvent:
+    """Captured stage transition used for persisted audit logs."""
+
+    stage: PipelineStage
+    transition: StageTransitionType
+    error_code: str | None
+    message: str | None
+
+
 class InProcessRunExecutor:
     """Default synchronous, in-process execution strategy for MVP reliability."""
+
+    def __init__(self) -> None:
+        self._stage_event_callback: StageEventCallback | None = None
+
+    def set_stage_event_callback(self, callback: StageEventCallback | None) -> None:
+        """Register callback used for persisted stage-transition events."""
+        self._stage_event_callback = callback
 
     def execute(self, *, db: Session, run: AnalysisRun) -> ExecutionPayload:
         old_artifact, new_artifact = self._run_stage(
@@ -223,21 +257,54 @@ class InProcessRunExecutor:
         **kwargs: object,
     ) -> object:
         try:
-            return func(**kwargs)  # type: ignore[misc]
-        except RunStageExecutionError:
+            self._emit_stage_transition(stage=stage, transition=StageTransitionType.STARTED)
+            result = func(**kwargs)  # type: ignore[misc]
+            self._emit_stage_transition(stage=stage, transition=StageTransitionType.SUCCEEDED)
+            return result
+        except RunStageExecutionError as exc:
+            self._emit_stage_transition(
+                stage=stage,
+                transition=StageTransitionType.FAILED,
+                error_code=exc.error_code,
+                message=str(exc),
+            )
             raise
         except OpenAPIProcessingError as exc:
+            self._emit_stage_transition(
+                stage=stage,
+                transition=StageTransitionType.FAILED,
+                error_code=error_code,
+                message=str(exc),
+            )
             raise RunStageExecutionError(
                 stage=stage,
                 error_code=error_code,
                 message=str(exc),
             ) from exc
         except Exception as exc:
+            self._emit_stage_transition(
+                stage=stage,
+                transition=StageTransitionType.FAILED,
+                error_code=error_code,
+                message=str(exc),
+            )
             raise RunStageExecutionError(
                 stage=stage,
                 error_code=error_code,
                 message=str(exc),
             ) from exc
+
+    def _emit_stage_transition(
+        self,
+        *,
+        stage: PipelineStage,
+        transition: StageTransitionType,
+        error_code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        if self._stage_event_callback is None:
+            return
+        self._stage_event_callback(stage, transition, error_code, message)
 
 
 class RunOrchestrationService:
@@ -253,9 +320,25 @@ class RunOrchestrationService:
         if run is None:
             raise RunNotFoundError(f"Run {run_id} was not found after claim.")
 
+        stage_events: list[StageTransitionEvent] = []
+        self._set_stage_event_callback(
+            callback=lambda stage, transition, error_code, message: stage_events.append(
+                StageTransitionEvent(
+                    stage=stage,
+                    transition=transition,
+                    error_code=error_code,
+                    message=message,
+                )
+            )
+        )
         try:
             payload = self._executor.execute(db=db, run=run)
-            self._persist_results(db=db, run=run, payload=payload)
+            self._persist_results_with_stage_events(
+                db=db,
+                run=run,
+                payload=payload,
+                stage_events=stage_events,
+            )
             run.status = RunStatus.COMPLETED.value
             run.completed_at = datetime.now(tz=UTC)
             run.locked_at = None
@@ -263,6 +346,14 @@ class RunOrchestrationService:
             run.failure_stage = None
             run.error_code = None
             run.failure_reason = None
+            self._append_attempt_audit_logs(
+                db=db,
+                run=run,
+                stage_events=stage_events,
+                final_status=RunStatus.COMPLETED,
+                failure_stage=None,
+                failure_error_code=None,
+            )
             db.commit()
             db.refresh(run)
             return run
@@ -274,6 +365,7 @@ class RunOrchestrationService:
                 stage=exc.stage,
                 error_code=exc.error_code,
                 reason=str(exc),
+                stage_events=stage_events,
             )
             raise
         except Exception as exc:
@@ -289,8 +381,11 @@ class RunOrchestrationService:
                 stage=fallback_error.stage,
                 error_code=fallback_error.error_code,
                 reason=str(fallback_error),
+                stage_events=stage_events,
             )
             raise fallback_error from exc
+        finally:
+            self._set_stage_event_callback(None)
 
     def _claim_pending_run(self, *, db: Session, run_id: uuid.UUID) -> None:
         claim_stmt = (
@@ -338,9 +433,9 @@ class RunOrchestrationService:
                     run_id=run.id,
                     source_artifact=payload.old_artifact,
                     kind=SnapshotKind.OLD,
-                    schema_version=payload.old_snapshot.schema_version,  # type: ignore[attr-defined]
-                    content_json=payload.old_snapshot.to_dict(),  # type: ignore[attr-defined]
-                    checksum=payload.old_snapshot.checksum(),  # type: ignore[attr-defined]
+                    schema_version=payload.old_snapshot.schema_version,
+                    content_json=payload.old_snapshot.to_dict(),
+                    checksum=payload.old_snapshot.checksum(),
                 )
             )
             db.add(
@@ -348,9 +443,9 @@ class RunOrchestrationService:
                     run_id=run.id,
                     source_artifact=payload.new_artifact,
                     kind=SnapshotKind.NEW,
-                    schema_version=payload.new_snapshot.schema_version,  # type: ignore[attr-defined]
-                    content_json=payload.new_snapshot.to_dict(),  # type: ignore[attr-defined]
-                    checksum=payload.new_snapshot.checksum(),  # type: ignore[attr-defined]
+                    schema_version=payload.new_snapshot.schema_version,
+                    content_json=payload.new_snapshot.to_dict(),
+                    checksum=payload.new_snapshot.checksum(),
                 )
             )
 
@@ -377,6 +472,58 @@ class RunOrchestrationService:
                 message=str(exc),
             ) from exc
 
+    def _persist_results_with_stage_events(
+        self,
+        *,
+        db: Session,
+        run: AnalysisRun,
+        payload: ExecutionPayload,
+        stage_events: list[StageTransitionEvent],
+    ) -> None:
+        stage_events.append(
+            StageTransitionEvent(
+                stage=PipelineStage.PERSIST_RESULTS,
+                transition=StageTransitionType.STARTED,
+                error_code=None,
+                message=None,
+            )
+        )
+        try:
+            self._persist_results(db=db, run=run, payload=payload)
+        except RunStageExecutionError as exc:
+            stage_events.append(
+                StageTransitionEvent(
+                    stage=PipelineStage.PERSIST_RESULTS,
+                    transition=StageTransitionType.FAILED,
+                    error_code=exc.error_code,
+                    message=str(exc),
+                )
+            )
+            raise
+        except Exception as exc:
+            stage_events.append(
+                StageTransitionEvent(
+                    stage=PipelineStage.PERSIST_RESULTS,
+                    transition=StageTransitionType.FAILED,
+                    error_code="persist_results_error",
+                    message=str(exc),
+                )
+            )
+            raise RunStageExecutionError(
+                stage=PipelineStage.PERSIST_RESULTS,
+                error_code="persist_results_error",
+                message=str(exc),
+            ) from exc
+
+        stage_events.append(
+            StageTransitionEvent(
+                stage=PipelineStage.PERSIST_RESULTS,
+                transition=StageTransitionType.SUCCEEDED,
+                error_code=None,
+                message=None,
+            )
+        )
+
     def _mark_failed(
         self,
         *,
@@ -385,20 +532,110 @@ class RunOrchestrationService:
         stage: PipelineStage,
         error_code: str,
         reason: str,
+        stage_events: list[StageTransitionEvent],
     ) -> None:
+        run = db.get(AnalysisRun, run_id)
+        if run is None:
+            raise RunNotFoundError(f"Run {run_id} does not exist.")
         db.execute(
             update(AnalysisRun)
             .where(AnalysisRun.id == run_id)
             .values(
                 status=RunStatus.FAILED.value,
                 locked_at=None,
+                completed_at=None,
                 failed_at=func.now(),
                 failure_stage=stage.value,
                 error_code=error_code,
                 failure_reason=reason,
             )
         )
+        run.status = RunStatus.FAILED.value
+        run.failure_stage = stage.value
+        run.error_code = error_code
+        self._append_attempt_audit_logs(
+            db=db,
+            run=run,
+            stage_events=stage_events,
+            final_status=RunStatus.FAILED,
+            failure_stage=stage,
+            failure_error_code=error_code,
+        )
         db.commit()
+
+    def _append_attempt_audit_logs(
+        self,
+        *,
+        db: Session,
+        run: AnalysisRun,
+        stage_events: list[StageTransitionEvent],
+        final_status: RunStatus,
+        failure_stage: PipelineStage | None,
+        failure_error_code: str | None,
+    ) -> None:
+        event_index = 0
+
+        event_index += 1
+        db.add(
+            AuditLog(
+                run_id=run.id,
+                event_type="run_status_transition",
+                actor="system:orchestrator",
+                payload_json={
+                    "event_index": event_index,
+                    "attempt_count": run.attempt_count,
+                    "from_status": RunStatus.PENDING.value,
+                    "to_status": RunStatus.PROCESSING.value,
+                },
+            )
+        )
+
+        for event in stage_events:
+            event_index += 1
+            payload: dict[str, Any] = {
+                "event_index": event_index,
+                "attempt_count": run.attempt_count,
+                "stage": event.stage.value,
+                "transition": event.transition.value,
+            }
+            if event.error_code is not None:
+                payload["error_code"] = event.error_code
+            if event.message is not None:
+                payload["message"] = event.message
+
+            db.add(
+                AuditLog(
+                    run_id=run.id,
+                    event_type="run_stage_transition",
+                    actor="system:orchestrator",
+                    payload_json=payload,
+                )
+            )
+
+        event_index += 1
+        status_payload: dict[str, Any] = {
+            "event_index": event_index,
+            "attempt_count": run.attempt_count,
+            "from_status": RunStatus.PROCESSING.value,
+            "to_status": final_status.value,
+        }
+        if final_status is RunStatus.FAILED:
+            status_payload["failure_stage"] = failure_stage.value if failure_stage else None
+            status_payload["error_code"] = failure_error_code
+
+        db.add(
+            AuditLog(
+                run_id=run.id,
+                event_type="run_status_transition",
+                actor="system:orchestrator",
+                payload_json=status_payload,
+            )
+        )
+
+    def _set_stage_event_callback(self, callback: StageEventCallback | None) -> None:
+        setter = getattr(self._executor, "set_stage_event_callback", None)
+        if callable(setter):
+            setter(callback)
 
 
 def _build_finding_key(*, order: int, sort_key: str) -> str:
