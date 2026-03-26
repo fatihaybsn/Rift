@@ -41,14 +41,41 @@ class SnapshotKind(StrEnum):
     NEW = "new"
 
 
+class RunStatus(StrEnum):
+    """Lifecycle status values for analysis runs."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class AnalysisRun(Base):
     """Top-level analysis run metadata."""
 
     __tablename__ = "analysis_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'failed')",
+            name="ck_analysis_runs_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_analysis_runs_attempt_count_non_negative",
+        ),
+        Index("ix_analysis_runs_status", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=RunStatus.PENDING.value)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     requested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -61,6 +88,7 @@ class AnalysisRun(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     spec_artifacts: Mapped[list[SpecArtifact]] = relationship(

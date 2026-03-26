@@ -8,6 +8,7 @@ from app.db.models import (
     DeterministicFinding,
     MigrationTask,
     NormalizedSnapshot,
+    RunStatus,
     SnapshotKind,
     SpecArtifact,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "DeterministicFinding",
     "MigrationTask",
     "NormalizedSnapshot",
+    "RunStatus",
     "SnapshotKind",
     "SpecArtifact",
     "get_db_session",

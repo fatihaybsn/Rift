@@ -27,6 +27,21 @@ EXPECTED_TABLES = {
     "normalized_snapshots",
     "spec_artifacts",
 }
+EXPECTED_ANALYSIS_RUN_COLUMNS = {
+    "id",
+    "status",
+    "attempt_count",
+    "locked_at",
+    "processing_started_at",
+    "requested_by",
+    "failure_stage",
+    "error_code",
+    "failure_reason",
+    "created_at",
+    "updated_at",
+    "failed_at",
+    "completed_at",
+}
 
 
 def _load_test_database_url() -> str:
@@ -89,9 +104,11 @@ def test_upgrade_head_creates_expected_tables(monkeypatch: pytest.MonkeyPatch) -
     engine = sa.create_engine(test_database_url)
     inspector = sa.inspect(engine)
     discovered_tables = set(inspector.get_table_names())
+    analysis_run_columns = {column["name"] for column in inspector.get_columns("analysis_runs")}
     engine.dispose()
 
     assert EXPECTED_TABLES.issubset(discovered_tables)
+    assert EXPECTED_ANALYSIS_RUN_COLUMNS.issubset(analysis_run_columns)
 
 
 def test_downgrade_base_drops_expected_tables(monkeypatch: pytest.MonkeyPatch) -> None:
