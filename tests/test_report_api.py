@@ -118,6 +118,19 @@ def _build_sample_findings(run_id: uuid.UUID) -> list[DeterministicFinding]:
             detail="New optional request parameter.",
             metadata_json={"code": "parameter_added", "compatibility": "non_breaking"},
         ),
+        DeterministicFinding(
+            id=uuid.UUID("44444444-4444-4444-4444-444444444444"),
+            run_id=run_id,
+            finding_key="000003:cccccccccccccccccccccccccccccccc",
+            finding_order=3,
+            category="request",
+            location="request:/pets#post",
+            http_method="post",
+            severity="high",
+            title="Request body required changed",
+            detail="A required request field was added.",
+            metadata_json={"code": "request_body_required_changed", "compatibility": "breaking"},
+        ),
     ]
 
 
@@ -191,19 +204,28 @@ def test_get_report_json_returns_stable_grouped_shape() -> None:
     assert body["run_id"] == str(run_id)
     assert body["status"] == "completed"
     assert body["summary_counts"] == {
-        "total_findings": 2,
+        "total_findings": 3,
         "findings_by_category": [
             {"category": "operation_surface", "count": 1},
             {"category": "parameter", "count": 1},
+            {"category": "request", "count": 1},
         ],
     }
-    assert body["severity_breakdown"] == {"high": 1, "medium": 0, "low": 1}
-    assert [item["category"] for item in body["findings_grouped"]] == [
-        "operation_surface",
-        "parameter",
+    assert body["severity_breakdown"] == {"high": 2, "medium": 0, "low": 1}
+    assert [item["severity"] for item in body["findings_grouped"]] == [
+        "high",
+        "low",
     ]
-    assert body["findings_grouped"][0]["items"][0]["code"] == "method_removed"
-    assert body["findings_grouped"][1]["items"][0]["code"] == "parameter_added"
+    assert [item["category"] for item in body["findings_grouped"][0]["categories"]] == [
+        "operation_surface",
+        "request",
+    ]
+    assert body["findings_grouped"][0]["categories"][0]["items"][0]["code"] == "method_removed"
+    assert (
+        body["findings_grouped"][0]["categories"][1]["items"][0]["code"]
+        == "request_body_required_changed"
+    )
+    assert body["findings_grouped"][1]["categories"][0]["items"][0]["code"] == "parameter_added"
     assert body["changelog_tasks"]["items"] == []
 
 
@@ -232,7 +254,7 @@ def test_get_report_markdown_snapshot_output() -> None:
     run_id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
     fake_session = FakeReadSession(
         run=_build_sample_run(run_id=run_id, status="completed"),
-        findings=[_build_sample_findings(run_id)[0]],
+        findings=[_build_sample_findings(run_id)[0], _build_sample_findings(run_id)[2]],
         migration_tasks=[_build_sample_task(run_id)],
     )
 
@@ -253,20 +275,28 @@ def test_get_report_markdown_snapshot_output() -> None:
             "- Updated At: `2026-03-20T12:00:00+00:00`",
             "",
             "## Summary Counts",
-            "- Total findings: 1",
-            "- High: 1",
+            "- Total findings: 2",
+            "- High: 2",
             "- Medium: 0",
             "- Low: 0",
             "",
-            "## Findings Grouped by Category",
+            "## Findings Grouped by Severity and Category",
             "",
-            "### operation_surface (1)",
+            "### HIGH (2)",
+            "#### operation_surface (1)",
             "1. **[HIGH]** `method_removed` at `operation:/pets#get`",
             "   - Key: `000001:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
             "   - Method: `get`",
             "   - Compatibility: `breaking`",
             "   - Title: Method removed",
             "   - Detail: Endpoint removal is a breaking API surface change.",
+            "#### request (1)",
+            "1. **[HIGH]** `request_body_required_changed` at `request:/pets#post`",
+            "   - Key: `000003:cccccccccccccccccccccccccccccccc`",
+            "   - Method: `post`",
+            "   - Compatibility: `breaking`",
+            "   - Title: Request body required changed",
+            "   - Detail: A required request field was added.",
             "",
             "## Changelog-derived Tasks (Placeholder)",
             (

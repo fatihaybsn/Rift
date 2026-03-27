@@ -78,12 +78,20 @@ class ReportFindingItem(BaseModel):
     detail: str | None
 
 
-class ReportFindingGroup(BaseModel):
-    """Group of findings under one category."""
+class ReportCategoryFindingGroup(BaseModel):
+    """Category-grouped findings inside one severity bucket."""
 
     category: str
     count: int
     items: list[ReportFindingItem]
+
+
+class ReportSeverityFindingGroup(BaseModel):
+    """Severity-grouped findings containing category buckets."""
+
+    severity: str
+    count: int
+    categories: list[ReportCategoryFindingGroup]
 
 
 class ChangelogTaskItem(BaseModel):
@@ -116,7 +124,7 @@ class ReportReadResponse(BaseModel):
     metadata: ReportMetadata
     summary_counts: SummaryCounts
     severity_breakdown: SeverityBreakdown
-    findings_grouped: list[ReportFindingGroup]
+    findings_grouped: list[ReportSeverityFindingGroup]
     changelog_tasks: ChangelogTasksSection
 
 
@@ -180,25 +188,50 @@ def _build_report_response(
     findings: list[DeterministicFinding],
     changelog_tasks: list[MigrationTask],
 ) -> ReportReadResponse:
-    grouped_items: dict[str, list[ReportFindingItem]] = defaultdict(list)
+    grouped_items: dict[str, dict[str, list[ReportFindingItem]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     severity_counts = {"high": 0, "medium": 0, "low": 0}
+    category_totals: dict[str, int] = defaultdict(int)
 
     for finding in findings:
-        if finding.severity in severity_counts:
-            severity_counts[finding.severity] += 1
-        grouped_items[finding.category].append(_to_report_finding_item(finding))
+        finding_item = _to_report_finding_item(finding)
+        if finding_item.severity in severity_counts:
+            severity_counts[finding_item.severity] += 1
+        grouped_items[finding_item.severity][finding_item.category].append(finding_item)
+        category_totals[finding_item.category] += 1
 
-    findings_grouped = [
-        ReportFindingGroup(
-            category=category,
-            count=len(grouped_items[category]),
-            items=grouped_items[category],
-        )
-        for category in sorted(grouped_items)
+    severity_order = ("high", "medium", "low")
+    unknown_severity_levels = sorted(
+        level for level in grouped_items if level not in severity_order
+    )
+    ordered_severity_levels = [
+        *[level for level in severity_order if level in grouped_items],
+        *unknown_severity_levels,
     ]
 
+    findings_grouped: list[ReportSeverityFindingGroup] = []
+    for severity in ordered_severity_levels:
+        category_map = grouped_items[severity]
+        category_groups = [
+            ReportCategoryFindingGroup(
+                category=category,
+                count=len(category_map[category]),
+                items=category_map[category],
+            )
+            for category in sorted(category_map)
+        ]
+        findings_grouped.append(
+            ReportSeverityFindingGroup(
+                severity=severity,
+                count=sum(group.count for group in category_groups),
+                categories=category_groups,
+            )
+        )
+
     category_counts = [
-        CategoryCount(category=group.category, count=group.count) for group in findings_grouped
+        CategoryCount(category=category, count=category_totals[category])
+        for category in sorted(category_totals)
     ]
 
     task_items = [
@@ -264,32 +297,34 @@ def _render_report_markdown(report: ReportReadResponse) -> str:
         f"- Medium: {report.severity_breakdown.medium}",
         f"- Low: {report.severity_breakdown.low}",
         "",
-        "## Findings Grouped by Category",
+        "## Findings Grouped by Severity and Category",
     ]
 
     if not report.findings_grouped:
         lines.append("_No findings recorded for this run._")
     else:
-        for group in report.findings_grouped:
+        for severity_group in report.findings_grouped:
             lines.extend(
                 [
                     "",
-                    f"### {group.category} ({group.count})",
+                    f"### {severity_group.severity.upper()} ({severity_group.count})",
                 ]
             )
-            for index, finding in enumerate(group.items, start=1):
-                lines.append(
-                    f"{index}. **[{finding.severity.upper()}]** "
-                    f"`{finding.code or 'unknown'}` at `{finding.location}`"
-                )
-                lines.append(f"   - Key: `{finding.key}`")
-                if finding.http_method is not None:
-                    lines.append(f"   - Method: `{finding.http_method}`")
-                if finding.compatibility is not None:
-                    lines.append(f"   - Compatibility: `{finding.compatibility}`")
-                lines.append(f"   - Title: {finding.title}")
-                if finding.detail is not None:
-                    lines.append(f"   - Detail: {finding.detail}")
+            for category_group in severity_group.categories:
+                lines.append(f"#### {category_group.category} ({category_group.count})")
+                for index, finding in enumerate(category_group.items, start=1):
+                    lines.append(
+                        f"{index}. **[{finding.severity.upper()}]** "
+                        f"`{finding.code or 'unknown'}` at `{finding.location}`"
+                    )
+                    lines.append(f"   - Key: `{finding.key}`")
+                    if finding.http_method is not None:
+                        lines.append(f"   - Method: `{finding.http_method}`")
+                    if finding.compatibility is not None:
+                        lines.append(f"   - Compatibility: `{finding.compatibility}`")
+                    lines.append(f"   - Title: {finding.title}")
+                    if finding.detail is not None:
+                        lines.append(f"   - Detail: {finding.detail}")
 
     lines.extend(
         [
