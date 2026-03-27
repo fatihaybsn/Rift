@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import datetime
 from typing import Final
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -49,6 +50,22 @@ class RunCreateResponse(BaseModel):
 
     run_id: uuid.UUID
     status: str
+
+
+class RunReadResponse(BaseModel):
+    """Response payload for reading one run."""
+
+    run_id: uuid.UUID
+    status: str
+    attempt_count: int
+    created_at: datetime
+    updated_at: datetime
+    processing_started_at: datetime | None
+    completed_at: datetime | None
+    failed_at: datetime | None
+    failure_stage: str | None
+    error_code: str | None
+    failure_reason: str | None
 
 
 def _normalize_media_type(content_type: str | None) -> str:
@@ -179,3 +196,31 @@ async def create_analysis_run(
             await upload_file.close()
 
     return RunCreateResponse(run_id=run.id, status=run.status)
+
+
+@runs_router.get("/{run_id}", response_model=RunReadResponse)
+def get_analysis_run(
+    run_id: uuid.UUID,
+    db: Session = DB_SESSION_DEP,
+) -> RunReadResponse:
+    """Fetch lifecycle metadata for one analysis run."""
+    run = db.get(AnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} was not found.",
+        )
+
+    return RunReadResponse(
+        run_id=run.id,
+        status=run.status,
+        attempt_count=run.attempt_count,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        processing_started_at=run.processing_started_at,
+        completed_at=run.completed_at,
+        failed_at=run.failed_at,
+        failure_stage=run.failure_stage,
+        error_code=run.error_code,
+        failure_reason=run.failure_reason,
+    )

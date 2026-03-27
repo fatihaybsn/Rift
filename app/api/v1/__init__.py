@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.reports import reports_router
 from app.api.v1.runs import runs_router
 
 # The router is mounted at the api_prefix defined in settings (default: "/api/v1").
@@ -18,3 +19,4 @@ async def v1_root() -> dict:
 
 # Future route modules will be included here:
 v1_router.include_router(runs_router)
+v1_router.include_router(reports_router)
