@@ -111,6 +111,18 @@ More detail will be added in `docs/architecture.md`.
 - OpenTelemetry
 - GitHub Actions
 
+## Demo report view (minimal)
+
+For demo purposes, the service also exposes a small server-rendered HTML report page:
+
+- `GET /api/v1/reports/{report_id}/demo`
+
+The page is intentionally minimal and read-only. It shows summary counts, top
+high-severity findings, and links to authoritative raw report outputs:
+
+- JSON: `GET /api/v1/reports/{report_id}`
+- Markdown: `GET /api/v1/reports/{report_id}?format=markdown`
+
 ## Local database configuration
 
 Create a local `.env` from the template and set your PostgreSQL role/password:

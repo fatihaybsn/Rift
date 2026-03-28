@@ -310,3 +310,63 @@ def test_get_report_markdown_snapshot_output() -> None:
         ]
     )
     assert response.text == expected
+
+
+def test_get_report_demo_returns_minimal_html_summary_links_and_top_high() -> None:
+    run_id = uuid.UUID("12121212-1212-1212-1212-121212121212")
+    fake_session = FakeReadSession(
+        run=_build_sample_run(run_id=run_id, status="completed"),
+        findings=_build_sample_findings(run_id),
+        migration_tasks=[],
+    )
+
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.get(f"{Settings().api_prefix}/reports/{run_id}/demo")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    body = response.text
+    assert "<h1>API Change Radar Report Demo</h1>" in body
+    assert "<h2>Summary Counts</h2>" in body
+    assert "<li>Total findings: 3</li>" in body
+    assert "<li>High: 2</li>" in body
+    assert "<li>Medium: 0</li>" in body
+    assert "<li>Low: 1</li>" in body
+    assert "<h2>Top High-Severity Findings</h2>" in body
+    assert body.count("<ol>") == 1
+    assert "Method removed" in body
+    assert "Request body required changed" in body
+    assert "Parameter added" not in body
+    assert f'<a href="../{run_id}">JSON</a>' in body
+    assert f'<a href="../{run_id}?format=markdown">Markdown</a>' in body
+
+
+def test_get_report_demo_escapes_dynamic_content() -> None:
+    run_id = uuid.UUID("13131313-1313-1313-1313-131313131313")
+    run = _build_sample_run(run_id=run_id, status="completed")
+    finding = DeterministicFinding(
+        id=uuid.UUID("14141414-1414-1414-1414-141414141414"),
+        run_id=run_id,
+        finding_key="000001:dddddddddddddddddddddddddddddddd",
+        finding_order=1,
+        category="operation_surface",
+        location='operation:/pets?<script>alert("x")</script>#get',
+        http_method='g<et&"',
+        severity="high",
+        title='<b>Method removed</b>',
+        detail='Detail with <img src=x onerror=alert(1)>',
+        metadata_json={"code": '<code&"', "compatibility": "breaking"},
+    )
+    fake_session = FakeReadSession(run=run, findings=[finding], migration_tasks=[])
+
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.get(f"{Settings().api_prefix}/reports/{run_id}/demo")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "<script>" not in body
+    assert "<img src=x onerror=alert(1)>" not in body
+    assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in body
+    assert "&lt;b&gt;Method removed&lt;/b&gt;" in body
+    assert "g&lt;et&amp;&quot;" in body
+    assert "&lt;code&amp;&quot;" in body

@@ -6,10 +6,11 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 from enum import StrEnum
+from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -346,6 +347,117 @@ def _render_report_markdown(report: ReportReadResponse) -> str:
                 lines.append(f"   - Related finding: `{task.finding_id}`")
             lines.append(f"   - Detail: {task.detail}")
     return "\n".join(lines)
+
+
+def _render_report_demo_html(report: ReportReadResponse, *, top_high_limit: int = 5) -> str:
+    high_findings: list[ReportFindingItem] = []
+    for severity_group in report.findings_grouped:
+        if severity_group.severity != "high":
+            continue
+        for category_group in severity_group.categories:
+            high_findings.extend(category_group.items)
+        break
+
+    top_high_findings = sorted(high_findings, key=lambda item: (item.order, item.key))[
+        :top_high_limit
+    ]
+    report_id_text = escape(str(report.report_id))
+    status_text = escape(report.status)
+    raw_json_href = escape(f"../{report.report_id}", quote=True)
+    raw_markdown_href = escape(f"../{report.report_id}?format=markdown", quote=True)
+
+    lines = [
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "  <meta charset=\"utf-8\" />",
+        f"  <title>API Change Radar Demo Report {report_id_text}</title>",
+        "</head>",
+        "<body>",
+        "  <main>",
+        "    <h1>API Change Radar Report Demo</h1>",
+        f"    <p><strong>Report ID:</strong> <code>{report_id_text}</code></p>",
+        f"    <p><strong>Status:</strong> {status_text}</p>",
+        "    <section>",
+        "      <h2>Summary Counts</h2>",
+        "      <ul>",
+        f"        <li>Total findings: {report.summary_counts.total_findings}</li>",
+        f"        <li>High: {report.severity_breakdown.high}</li>",
+        f"        <li>Medium: {report.severity_breakdown.medium}</li>",
+        f"        <li>Low: {report.severity_breakdown.low}</li>",
+        "      </ul>",
+        "    </section>",
+        "    <section>",
+        "      <h2>Top High-Severity Findings</h2>",
+        f"      <p>Showing up to {top_high_limit} findings in deterministic order.</p>",
+    ]
+
+    if not top_high_findings:
+        lines.append("      <p>No high-severity findings.</p>")
+    else:
+        lines.append("      <ol>")
+        for finding in top_high_findings:
+            code_text = escape(finding.code or "unknown")
+            location_text = escape(finding.location)
+            title_text = escape(finding.title)
+            lines.extend(
+                [
+                    "        <li>",
+                    f"          <strong>{title_text}</strong>",
+                    (
+                        f"          <div><code>{code_text}</code> "
+                        f"at <code>{location_text}</code></div>"
+                    ),
+                ]
+            )
+            if finding.http_method is not None:
+                method_text = escape(finding.http_method)
+                lines.append(f"          <div>Method: <code>{method_text}</code></div>")
+            if finding.detail is not None:
+                detail_text = escape(finding.detail)
+                lines.append(f"          <div>Detail: {detail_text}</div>")
+            lines.append("        </li>")
+        lines.append("      </ol>")
+
+    lines.extend(
+        [
+            "    </section>",
+            "    <section>",
+            "      <h2>Raw Report Links</h2>",
+            "      <ul>",
+            f"        <li><a href=\"{raw_json_href}\">JSON</a></li>",
+            f"        <li><a href=\"{raw_markdown_href}\">Markdown</a></li>",
+            "      </ul>",
+            "    </section>",
+            "  </main>",
+            "</body>",
+            "</html>",
+        ]
+    )
+    return "\n".join(lines)
+
+
+@reports_router.get(
+    "/{report_id}/demo",
+    responses={200: {"content": {"text/html": {}}}},
+)
+def get_report_demo(
+    report_id: uuid.UUID,
+    db: Session = DB_SESSION_DEP,
+) -> HTMLResponse:
+    """Fetch a minimal server-rendered HTML demo for one report."""
+    run = _get_run_or_404(db=db, run_id=report_id)
+    findings = _load_findings(db=db, run_id=report_id)
+    changelog_tasks = _load_changelog_tasks(db=db, run_id=report_id)
+    response_payload = _build_report_response(
+        run=run,
+        findings=findings,
+        changelog_tasks=changelog_tasks,
+    )
+    return HTMLResponse(
+        content=_render_report_demo_html(response_payload),
+        media_type="text/html",
+    )
 
 
 @reports_router.get(
