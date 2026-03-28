@@ -115,7 +115,8 @@ More detail will be added in `docs/architecture.md`.
 
 For demo purposes, the service also exposes a small server-rendered HTML report page:
 
-- `GET /api/v1/reports/{report_id}/demo`
+- `GET /api/v1/demo/runs/{report_id}` (demo-first route)
+- `GET /api/v1/reports/{report_id}/demo` (report-scoped alias)
 
 The page is intentionally minimal and read-only. It shows summary counts, top
 high-severity findings, and links to authoritative raw report outputs:

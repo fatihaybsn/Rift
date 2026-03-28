@@ -9,7 +9,7 @@ from enum import StrEnum
 from html import escape
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.db import AnalysisRun, DeterministicFinding, MigrationTask, get_db_session
 
 reports_router = APIRouter(prefix="/reports", tags=["reports"])
+demo_router = APIRouter(prefix="/demo", tags=["demo"])
 DB_SESSION_DEP = Depends(get_db_session)
 
 
@@ -282,6 +283,17 @@ def _build_report_response(
     )
 
 
+def _build_report_payload(*, db: Session, report_id: uuid.UUID) -> ReportReadResponse:
+    run = _get_run_or_404(db=db, run_id=report_id)
+    findings = _load_findings(db=db, run_id=report_id)
+    changelog_tasks = _load_changelog_tasks(db=db, run_id=report_id)
+    return _build_report_response(
+        run=run,
+        findings=findings,
+        changelog_tasks=changelog_tasks,
+    )
+
+
 def _render_report_markdown(report: ReportReadResponse) -> str:
     lines = [
         "# API Change Radar Report",
@@ -349,7 +361,23 @@ def _render_report_markdown(report: ReportReadResponse) -> str:
     return "\n".join(lines)
 
 
-def _render_report_demo_html(report: ReportReadResponse, *, top_high_limit: int = 5) -> str:
+def _build_demo_raw_report_links(
+    *,
+    request: Request,
+    report_id: uuid.UUID,
+) -> tuple[str, str]:
+    json_url = str(request.url_for("get_report", report_id=str(report_id)))
+    markdown_url = f"{json_url}?format={ReportFormat.MARKDOWN.value}"
+    return json_url, markdown_url
+
+
+def _render_report_demo_html(
+    report: ReportReadResponse,
+    *,
+    raw_json_href: str,
+    raw_markdown_href: str,
+    top_high_limit: int = 5,
+) -> str:
     high_findings: list[ReportFindingItem] = []
     for severity_group in report.findings_grouped:
         if severity_group.severity != "high":
@@ -363,8 +391,8 @@ def _render_report_demo_html(report: ReportReadResponse, *, top_high_limit: int 
     ]
     report_id_text = escape(str(report.report_id))
     status_text = escape(report.status)
-    raw_json_href = escape(f"../{report.report_id}", quote=True)
-    raw_markdown_href = escape(f"../{report.report_id}?format=markdown", quote=True)
+    raw_json_href_text = escape(raw_json_href, quote=True)
+    raw_markdown_href_text = escape(raw_markdown_href, quote=True)
 
     lines = [
         "<!doctype html>",
@@ -425,8 +453,8 @@ def _render_report_demo_html(report: ReportReadResponse, *, top_high_limit: int 
             "    <section>",
             "      <h2>Raw Report Links</h2>",
             "      <ul>",
-            f"        <li><a href=\"{raw_json_href}\">JSON</a></li>",
-            f"        <li><a href=\"{raw_markdown_href}\">Markdown</a></li>",
+            f"        <li><a href=\"{raw_json_href_text}\">JSON</a></li>",
+            f"        <li><a href=\"{raw_markdown_href_text}\">Markdown</a></li>",
             "      </ul>",
             "    </section>",
             "  </main>",
@@ -437,26 +465,58 @@ def _render_report_demo_html(report: ReportReadResponse, *, top_high_limit: int 
     return "\n".join(lines)
 
 
+def _build_demo_html_response(
+    *,
+    report_id: uuid.UUID,
+    request: Request,
+    db: Session,
+) -> HTMLResponse:
+    report = _build_report_payload(db=db, report_id=report_id)
+    raw_json_href, raw_markdown_href = _build_demo_raw_report_links(
+        request=request,
+        report_id=report_id,
+    )
+    return HTMLResponse(
+        content=_render_report_demo_html(
+            report,
+            raw_json_href=raw_json_href,
+            raw_markdown_href=raw_markdown_href,
+        ),
+        media_type="text/html",
+    )
+
+
 @reports_router.get(
     "/{report_id}/demo",
     responses={200: {"content": {"text/html": {}}}},
 )
 def get_report_demo(
     report_id: uuid.UUID,
+    request: Request,
     db: Session = DB_SESSION_DEP,
 ) -> HTMLResponse:
     """Fetch a minimal server-rendered HTML demo for one report."""
-    run = _get_run_or_404(db=db, run_id=report_id)
-    findings = _load_findings(db=db, run_id=report_id)
-    changelog_tasks = _load_changelog_tasks(db=db, run_id=report_id)
-    response_payload = _build_report_response(
-        run=run,
-        findings=findings,
-        changelog_tasks=changelog_tasks,
+    return _build_demo_html_response(
+        report_id=report_id,
+        request=request,
+        db=db,
     )
-    return HTMLResponse(
-        content=_render_report_demo_html(response_payload),
-        media_type="text/html",
+
+
+@demo_router.get(
+    "/runs/{report_id}",
+    responses={200: {"content": {"text/html": {}}}},
+)
+def get_demo_run_report(
+    report_id: uuid.UUID,
+    request: Request,
+    db: Session = DB_SESSION_DEP,
+) -> HTMLResponse:
+    """Fetch the minimal demo report page from the top-level demo route."""
+    return _build_demo_html_response(
+        report_id=report_id,
+        request=request,
+        db=db,
     )
 
 
@@ -471,14 +531,7 @@ def get_report(
     db: Session = DB_SESSION_DEP,
 ) -> ReportReadResponse | PlainTextResponse:
     """Fetch one report in JSON (default) or markdown format."""
-    run = _get_run_or_404(db=db, run_id=report_id)
-    findings = _load_findings(db=db, run_id=report_id)
-    changelog_tasks = _load_changelog_tasks(db=db, run_id=report_id)
-    response_payload = _build_report_response(
-        run=run,
-        findings=findings,
-        changelog_tasks=changelog_tasks,
-    )
+    response_payload = _build_report_payload(db=db, report_id=report_id)
 
     if format is ReportFormat.MARKDOWN:
         return PlainTextResponse(

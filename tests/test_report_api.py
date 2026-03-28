@@ -337,8 +337,11 @@ def test_get_report_demo_returns_minimal_html_summary_links_and_top_high() -> No
     assert "Method removed" in body
     assert "Request body required changed" in body
     assert "Parameter added" not in body
-    assert f'<a href="../{run_id}">JSON</a>' in body
-    assert f'<a href="../{run_id}?format=markdown">Markdown</a>' in body
+    assert f'<a href="http://testserver/api/v1/reports/{run_id}">JSON</a>' in body
+    assert (
+        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">'
+        "Markdown</a>"
+    ) in body
 
 
 def test_get_report_demo_escapes_dynamic_content() -> None:
@@ -370,3 +373,27 @@ def test_get_report_demo_escapes_dynamic_content() -> None:
     assert "&lt;b&gt;Method removed&lt;/b&gt;" in body
     assert "g&lt;et&amp;&quot;" in body
     assert "&lt;code&amp;&quot;" in body
+
+
+def test_get_demo_runs_route_returns_same_minimal_html() -> None:
+    run_id = uuid.UUID("15151515-1515-1515-1515-151515151515")
+    fake_session = FakeReadSession(
+        run=_build_sample_run(run_id=run_id, status="completed"),
+        findings=_build_sample_findings(run_id),
+        migration_tasks=[],
+    )
+
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.get(f"{Settings().api_prefix}/demo/runs/{run_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    body = response.text
+    assert "<h1>API Change Radar Report Demo</h1>" in body
+    assert "<h2>Summary Counts</h2>" in body
+    assert "<h2>Top High-Severity Findings</h2>" in body
+    assert f'<a href="http://testserver/api/v1/reports/{run_id}">JSON</a>' in body
+    assert (
+        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">'
+        "Markdown</a>"
+    ) in body
