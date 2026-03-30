@@ -27,6 +27,7 @@ def configure_logging(log_level: str = "INFO") -> None:
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.TimeStamper(fmt="iso"),
             _add_trace_context,
+            _add_correlation_defaults,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
@@ -54,4 +55,15 @@ def _add_trace_context(
     if span_context.is_valid:
         event_dict["trace_id"] = f"{span_context.trace_id:032x}"
         event_dict["span_id"] = f"{span_context.span_id:016x}"
+    return event_dict
+
+
+def _add_correlation_defaults(
+    _logger: structlog.stdlib.BoundLogger,
+    _method_name: str,
+    event_dict: dict[str, object],
+) -> dict[str, object]:
+    event_dict.setdefault("request_id", None)
+    event_dict.setdefault("run_id", None)
+    event_dict.setdefault("stage", None)
     return event_dict

@@ -153,9 +153,14 @@ For safety, the database name must include `test`.
 The service now includes practical MVP observability:
 
 - OpenTelemetry tracing for FastAPI requests
-- custom spans for run orchestration stages
+- custom spans for run orchestration stages:
+  - `validate_spec`
+  - `normalize_spec`
+  - `compute_diff`
+  - `apply_rules`
+  - `persist_report`
 - Prometheus-style metrics at `GET /metrics`
-- structured JSON logs with request/trace correlation fields
+- structured JSON logs with correlation fields: `request_id`, `run_id`, `stage`
 
 ### 1) Run with local console tracing
 
@@ -187,10 +192,11 @@ Open:
 
 Key metrics include:
 
-- `api_change_radar_runs_total`
-- `api_change_radar_run_duration_seconds`
-- `api_change_radar_run_failures_total`
-- `api_change_radar_breaking_findings_total`
+- `analysis_runs_total`
+- `analysis_duration_seconds`
+- `spec_validation_failures_total`
+- `breaking_changes_total`
+- `report_generation_failures_total`
 
 ## Repository status
 

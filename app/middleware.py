@@ -56,6 +56,8 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             logger.exception(
                 "request_failed",
                 request_id=request_id,
+                run_id=None,
+                stage="request",
                 http_method=request.method,
                 http_path=request.url.path,
             )

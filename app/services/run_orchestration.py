@@ -263,8 +263,10 @@ class InProcessRunExecutor:
         func: object,
         **kwargs: object,
     ) -> object:
-        with tracer.start_as_current_span(f"run.stage.{stage.value}") as span:
+        span_name = _stage_to_span_name(stage)
+        with tracer.start_as_current_span(span_name) as span:
             span.set_attribute("run.pipeline.stage", stage.value)
+            span.set_attribute("run.stage.span_name", span_name)
             try:
                 self._emit_stage_transition(stage=stage, transition=StageTransitionType.STARTED)
                 result = func(**kwargs)  # type: ignore[misc]
@@ -336,7 +338,11 @@ class RunOrchestrationService:
         run = db.get(AnalysisRun, run_id)
         if run is None:
             raise RunNotFoundError(f"Run {run_id} was not found after claim.")
-        run_logger = logger.bind(run_id=str(run.id), attempt_count=run.attempt_count)
+        run_logger = logger.bind(
+            run_id=str(run.id),
+            attempt_count=run.attempt_count,
+            stage="run_process",
+        )
 
         with tracer.start_as_current_span("run.process") as run_span:
             run_span.set_attribute("run.id", str(run.id))
@@ -422,6 +428,7 @@ class RunOrchestrationService:
                 run_span.set_attribute("run.error_code", exc.error_code)
                 run_logger.exception(
                     "run_processing_failed",
+                    stage=exc.stage.value,
                     failure_stage=exc.stage.value,
                     error_code=exc.error_code,
                     duration_seconds=duration_seconds,
@@ -456,6 +463,7 @@ class RunOrchestrationService:
                 run_span.set_attribute("run.error_code", fallback_error.error_code)
                 run_logger.exception(
                     "run_processing_failed_unhandled",
+                    stage=fallback_error.stage.value,
                     failure_stage=fallback_error.stage.value,
                     error_code=fallback_error.error_code,
                     duration_seconds=duration_seconds,
@@ -558,9 +566,10 @@ class RunOrchestrationService:
         payload: ExecutionPayload,
         stage_events: list[StageTransitionEvent],
     ) -> None:
-        persist_span_name = f"run.stage.{PipelineStage.PERSIST_RESULTS.value}"
+        persist_span_name = _stage_to_span_name(PipelineStage.PERSIST_RESULTS)
         with tracer.start_as_current_span(persist_span_name) as span:
             span.set_attribute("run.pipeline.stage", PipelineStage.PERSIST_RESULTS.value)
+            span.set_attribute("run.stage.span_name", persist_span_name)
             stage_events.append(
                 StageTransitionEvent(
                     stage=PipelineStage.PERSIST_RESULTS,
@@ -735,6 +744,19 @@ def _count_breaking_findings(classified_findings: tuple[ClassifiedFinding, ...])
         for item in classified_findings
         if item.finding.compatibility is CompatibilityClassification.BREAKING
     )
+
+
+def _stage_to_span_name(stage: PipelineStage) -> str:
+    mapping = {
+        PipelineStage.VALIDATE_SPEC_OLD: "validate_spec",
+        PipelineStage.VALIDATE_SPEC_NEW: "validate_spec",
+        PipelineStage.NORMALIZE_OLD: "normalize_spec",
+        PipelineStage.NORMALIZE_NEW: "normalize_spec",
+        PipelineStage.COMPUTE_DIFF: "compute_diff",
+        PipelineStage.APPLY_SEVERITY: "apply_rules",
+        PipelineStage.PERSIST_RESULTS: "persist_report",
+    }
+    return mapping.get(stage, f"run.stage.{stage.value}")
 
 
 __all__ = [

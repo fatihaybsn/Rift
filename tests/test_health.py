@@ -36,7 +36,11 @@ def test_metrics_endpoint_exposes_prometheus_payload(client: TestClient) -> None
     response = client.get("/metrics")
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
-    assert "api_change_radar_runs_total" in response.text
+    assert "analysis_runs_total" in response.text
+    assert "analysis_duration_seconds" in response.text
+    assert "spec_validation_failures_total" in response.text
+    assert "breaking_changes_total" in response.text
+    assert "report_generation_failures_total" in response.text
 
 
 def test_request_id_middleware_injects_header(client: TestClient) -> None:
