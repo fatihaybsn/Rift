@@ -8,12 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, Protocol
 
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
-from app.core.diff_engine import diff_canonical_snapshots
+from app.core.diff_engine import CompatibilityClassification, diff_canonical_snapshots
 from app.core.openapi_processing import (
     CanonicalOpenAPISnapshot,
     OpenAPIProcessingError,
@@ -32,6 +34,11 @@ from app.db import (
     SnapshotKind,
     SpecArtifact,
 )
+from app.logging import get_logger
+from app.observability import get_tracer, record_run_failure, record_run_success
+
+logger = get_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 class PipelineStage(StrEnum):
@@ -256,43 +263,52 @@ class InProcessRunExecutor:
         func: object,
         **kwargs: object,
     ) -> object:
-        try:
-            self._emit_stage_transition(stage=stage, transition=StageTransitionType.STARTED)
-            result = func(**kwargs)  # type: ignore[misc]
-            self._emit_stage_transition(stage=stage, transition=StageTransitionType.SUCCEEDED)
-            return result
-        except RunStageExecutionError as exc:
-            self._emit_stage_transition(
-                stage=stage,
-                transition=StageTransitionType.FAILED,
-                error_code=exc.error_code,
-                message=str(exc),
-            )
-            raise
-        except OpenAPIProcessingError as exc:
-            self._emit_stage_transition(
-                stage=stage,
-                transition=StageTransitionType.FAILED,
-                error_code=error_code,
-                message=str(exc),
-            )
-            raise RunStageExecutionError(
-                stage=stage,
-                error_code=error_code,
-                message=str(exc),
-            ) from exc
-        except Exception as exc:
-            self._emit_stage_transition(
-                stage=stage,
-                transition=StageTransitionType.FAILED,
-                error_code=error_code,
-                message=str(exc),
-            )
-            raise RunStageExecutionError(
-                stage=stage,
-                error_code=error_code,
-                message=str(exc),
-            ) from exc
+        with tracer.start_as_current_span(f"run.stage.{stage.value}") as span:
+            span.set_attribute("run.pipeline.stage", stage.value)
+            try:
+                self._emit_stage_transition(stage=stage, transition=StageTransitionType.STARTED)
+                result = func(**kwargs)  # type: ignore[misc]
+                self._emit_stage_transition(stage=stage, transition=StageTransitionType.SUCCEEDED)
+                span.set_status(Status(StatusCode.OK))
+                return result
+            except RunStageExecutionError as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                self._emit_stage_transition(
+                    stage=stage,
+                    transition=StageTransitionType.FAILED,
+                    error_code=exc.error_code,
+                    message=str(exc),
+                )
+                raise
+            except OpenAPIProcessingError as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                self._emit_stage_transition(
+                    stage=stage,
+                    transition=StageTransitionType.FAILED,
+                    error_code=error_code,
+                    message=str(exc),
+                )
+                raise RunStageExecutionError(
+                    stage=stage,
+                    error_code=error_code,
+                    message=str(exc),
+                ) from exc
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                self._emit_stage_transition(
+                    stage=stage,
+                    transition=StageTransitionType.FAILED,
+                    error_code=error_code,
+                    message=str(exc),
+                )
+                raise RunStageExecutionError(
+                    stage=stage,
+                    error_code=error_code,
+                    message=str(exc),
+                ) from exc
 
     def _emit_stage_transition(
         self,
@@ -315,77 +331,139 @@ class RunOrchestrationService:
 
     def process_run(self, *, db: Session, run_id: uuid.UUID) -> AnalysisRun:
         """Process one run synchronously from pending to completed/failed."""
+        started_at = perf_counter()
         self._claim_pending_run(db=db, run_id=run_id)
         run = db.get(AnalysisRun, run_id)
         if run is None:
             raise RunNotFoundError(f"Run {run_id} was not found after claim.")
+        run_logger = logger.bind(run_id=str(run.id), attempt_count=run.attempt_count)
 
-        stage_events: list[StageTransitionEvent] = []
-        self._set_stage_event_callback(
-            callback=lambda stage, transition, error_code, message: stage_events.append(
-                StageTransitionEvent(
-                    stage=stage,
-                    transition=transition,
-                    error_code=error_code,
-                    message=message,
+        with tracer.start_as_current_span("run.process") as run_span:
+            run_span.set_attribute("run.id", str(run.id))
+            run_span.set_attribute("run.attempt_count", run.attempt_count)
+            run_span.set_attribute("run.status.initial", run.status)
+            run_logger.info("run_processing_started", status=run.status)
+
+            stage_events: list[StageTransitionEvent] = []
+            self._set_stage_event_callback(
+                callback=lambda stage, transition, error_code, message: stage_events.append(
+                    StageTransitionEvent(
+                        stage=stage,
+                        transition=transition,
+                        error_code=error_code,
+                        message=message,
+                    )
                 )
             )
-        )
-        try:
-            payload = self._executor.execute(db=db, run=run)
-            self._persist_results_with_stage_events(
-                db=db,
-                run=run,
-                payload=payload,
-                stage_events=stage_events,
-            )
-            run.status = RunStatus.COMPLETED.value
-            run.completed_at = datetime.now(tz=UTC)
-            run.locked_at = None
-            run.failed_at = None
-            run.failure_stage = None
-            run.error_code = None
-            run.failure_reason = None
-            self._append_attempt_audit_logs(
-                db=db,
-                run=run,
-                stage_events=stage_events,
-                final_status=RunStatus.COMPLETED,
-                failure_stage=None,
-                failure_error_code=None,
-            )
-            db.commit()
-            db.refresh(run)
-            return run
-        except RunStageExecutionError as exc:
-            db.rollback()
-            self._mark_failed(
-                db=db,
-                run_id=run_id,
-                stage=exc.stage,
-                error_code=exc.error_code,
-                reason=str(exc),
-                stage_events=stage_events,
-            )
-            raise
-        except Exception as exc:
-            db.rollback()
-            fallback_error = RunStageExecutionError(
-                stage=PipelineStage.PERSIST_RESULTS,
-                error_code="orchestration_unhandled_error",
-                message=str(exc),
-            )
-            self._mark_failed(
-                db=db,
-                run_id=run_id,
-                stage=fallback_error.stage,
-                error_code=fallback_error.error_code,
-                reason=str(fallback_error),
-                stage_events=stage_events,
-            )
-            raise fallback_error from exc
-        finally:
-            self._set_stage_event_callback(None)
+            try:
+                payload = self._executor.execute(db=db, run=run)
+                self._persist_results_with_stage_events(
+                    db=db,
+                    run=run,
+                    payload=payload,
+                    stage_events=stage_events,
+                )
+                run.status = RunStatus.COMPLETED.value
+                run.completed_at = datetime.now(tz=UTC)
+                run.locked_at = None
+                run.failed_at = None
+                run.failure_stage = None
+                run.error_code = None
+                run.failure_reason = None
+                self._append_attempt_audit_logs(
+                    db=db,
+                    run=run,
+                    stage_events=stage_events,
+                    final_status=RunStatus.COMPLETED,
+                    failure_stage=None,
+                    failure_error_code=None,
+                )
+                db.commit()
+                db.refresh(run)
+
+                breaking_change_count = _count_breaking_findings(payload.classified_findings)
+                duration_seconds = perf_counter() - started_at
+                record_run_success(
+                    duration_seconds=duration_seconds,
+                    breaking_change_count=breaking_change_count,
+                )
+                run_span.set_attribute("run.status.final", run.status)
+                run_span.set_attribute("run.findings_count", len(payload.classified_findings))
+                run_span.set_attribute("run.breaking_change_count", breaking_change_count)
+                run_span.set_status(Status(StatusCode.OK))
+                run_logger.info(
+                    "run_processing_completed",
+                    final_status=run.status,
+                    findings_count=len(payload.classified_findings),
+                    breaking_change_count=breaking_change_count,
+                    duration_seconds=duration_seconds,
+                )
+                return run
+            except RunStageExecutionError as exc:
+                db.rollback()
+                self._mark_failed(
+                    db=db,
+                    run_id=run_id,
+                    stage=exc.stage,
+                    error_code=exc.error_code,
+                    reason=str(exc),
+                    stage_events=stage_events,
+                )
+                duration_seconds = perf_counter() - started_at
+                record_run_failure(
+                    duration_seconds=duration_seconds,
+                    failure_stage=exc.stage.value,
+                    error_code=exc.error_code,
+                )
+                run_span.record_exception(exc)
+                run_span.set_status(Status(StatusCode.ERROR, str(exc)))
+                run_span.set_attribute("run.status.final", RunStatus.FAILED.value)
+                run_span.set_attribute("run.failure_stage", exc.stage.value)
+                run_span.set_attribute("run.error_code", exc.error_code)
+                run_logger.exception(
+                    "run_processing_failed",
+                    failure_stage=exc.stage.value,
+                    error_code=exc.error_code,
+                    duration_seconds=duration_seconds,
+                    stage_event_count=len(stage_events),
+                )
+                raise
+            except Exception as exc:
+                db.rollback()
+                fallback_error = RunStageExecutionError(
+                    stage=PipelineStage.PERSIST_RESULTS,
+                    error_code="orchestration_unhandled_error",
+                    message=str(exc),
+                )
+                self._mark_failed(
+                    db=db,
+                    run_id=run_id,
+                    stage=fallback_error.stage,
+                    error_code=fallback_error.error_code,
+                    reason=str(fallback_error),
+                    stage_events=stage_events,
+                )
+                duration_seconds = perf_counter() - started_at
+                record_run_failure(
+                    duration_seconds=duration_seconds,
+                    failure_stage=fallback_error.stage.value,
+                    error_code=fallback_error.error_code,
+                )
+                run_span.record_exception(exc)
+                run_span.set_status(Status(StatusCode.ERROR, str(fallback_error)))
+                run_span.set_attribute("run.status.final", RunStatus.FAILED.value)
+                run_span.set_attribute("run.failure_stage", fallback_error.stage.value)
+                run_span.set_attribute("run.error_code", fallback_error.error_code)
+                run_logger.exception(
+                    "run_processing_failed_unhandled",
+                    failure_stage=fallback_error.stage.value,
+                    error_code=fallback_error.error_code,
+                    duration_seconds=duration_seconds,
+                    stage_event_count=len(stage_events),
+                )
+                raise fallback_error from exc
+            finally:
+                self._set_stage_event_callback(None)
 
     def _claim_pending_run(self, *, db: Session, run_id: uuid.UUID) -> None:
         claim_stmt = (
@@ -480,49 +558,57 @@ class RunOrchestrationService:
         payload: ExecutionPayload,
         stage_events: list[StageTransitionEvent],
     ) -> None:
-        stage_events.append(
-            StageTransitionEvent(
-                stage=PipelineStage.PERSIST_RESULTS,
-                transition=StageTransitionType.STARTED,
-                error_code=None,
-                message=None,
-            )
-        )
-        try:
-            self._persist_results(db=db, run=run, payload=payload)
-        except RunStageExecutionError as exc:
+        persist_span_name = f"run.stage.{PipelineStage.PERSIST_RESULTS.value}"
+        with tracer.start_as_current_span(persist_span_name) as span:
+            span.set_attribute("run.pipeline.stage", PipelineStage.PERSIST_RESULTS.value)
             stage_events.append(
                 StageTransitionEvent(
                     stage=PipelineStage.PERSIST_RESULTS,
-                    transition=StageTransitionType.FAILED,
-                    error_code=exc.error_code,
-                    message=str(exc),
+                    transition=StageTransitionType.STARTED,
+                    error_code=None,
+                    message=None,
                 )
             )
-            raise
-        except Exception as exc:
-            stage_events.append(
-                StageTransitionEvent(
+            try:
+                self._persist_results(db=db, run=run, payload=payload)
+            except RunStageExecutionError as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                stage_events.append(
+                    StageTransitionEvent(
+                        stage=PipelineStage.PERSIST_RESULTS,
+                        transition=StageTransitionType.FAILED,
+                        error_code=exc.error_code,
+                        message=str(exc),
+                    )
+                )
+                raise
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                stage_events.append(
+                    StageTransitionEvent(
+                        stage=PipelineStage.PERSIST_RESULTS,
+                        transition=StageTransitionType.FAILED,
+                        error_code="persist_results_error",
+                        message=str(exc),
+                    )
+                )
+                raise RunStageExecutionError(
                     stage=PipelineStage.PERSIST_RESULTS,
-                    transition=StageTransitionType.FAILED,
                     error_code="persist_results_error",
                     message=str(exc),
+                ) from exc
+
+            span.set_status(Status(StatusCode.OK))
+            stage_events.append(
+                StageTransitionEvent(
+                    stage=PipelineStage.PERSIST_RESULTS,
+                    transition=StageTransitionType.SUCCEEDED,
+                    error_code=None,
+                    message=None,
                 )
             )
-            raise RunStageExecutionError(
-                stage=PipelineStage.PERSIST_RESULTS,
-                error_code="persist_results_error",
-                message=str(exc),
-            ) from exc
-
-        stage_events.append(
-            StageTransitionEvent(
-                stage=PipelineStage.PERSIST_RESULTS,
-                transition=StageTransitionType.SUCCEEDED,
-                error_code=None,
-                message=None,
-            )
-        )
 
     def _mark_failed(
         self,
@@ -641,6 +727,14 @@ class RunOrchestrationService:
 def _build_finding_key(*, order: int, sort_key: str) -> str:
     digest = hashlib.sha256(sort_key.encode("utf-8")).hexdigest()
     return f"{order:06d}:{digest}"
+
+
+def _count_breaking_findings(classified_findings: tuple[ClassifiedFinding, ...]) -> int:
+    return sum(
+        1
+        for item in classified_findings
+        if item.finding.compatibility is CompatibilityClassification.BREAKING
+    )
 
 
 __all__ = [

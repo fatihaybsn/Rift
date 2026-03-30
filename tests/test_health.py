@@ -31,6 +31,14 @@ def test_readyz_returns_200(client: TestClient) -> None:
     assert body["service"] == "api-change-radar"
 
 
+def test_metrics_endpoint_exposes_prometheus_payload(client: TestClient) -> None:
+    """Smoke check that /metrics exists and serves Prometheus-style text."""
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "api_change_radar_runs_total" in response.text
+
+
 def test_request_id_middleware_injects_header(client: TestClient) -> None:
     """Test that RequestIdMiddleware adds X-Request-ID to response."""
     response = client.get("/healthz")

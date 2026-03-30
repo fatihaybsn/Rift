@@ -8,6 +8,7 @@ from app.api.v1 import v1_router
 from app.core.config import Settings
 from app.logging import configure_logging, get_logger
 from app.middleware import RequestIdMiddleware
+from app.observability import configure_tracing, instrument_fastapi
 
 logger = get_logger(__name__)
 
@@ -19,6 +20,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Configure structured logging before first startup log entry.
     configure_logging(log_level=settings.log_level)
+    configure_tracing(
+        service_name=settings.app_name,
+        environment=settings.environment,
+        exporter_mode=settings.tracing_exporter,
+        otlp_endpoint=settings.otlp_endpoint,
+    )
 
     logger.info(
         "creating_app",
@@ -62,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Register routers
     app.include_router(health_router)
     app.include_router(v1_router, prefix=settings.api_prefix)
+    instrument_fastapi(app)
 
     logger.info("app_created", api_prefix=settings.api_prefix)
     return app

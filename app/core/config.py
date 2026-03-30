@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # Logging
     log_level: LogLevel = Field(default="INFO", description="Structured log level")
 
+    # Tracing
+    tracing_exporter: str = Field(
+        default="none",
+        description="Tracing exporter mode: none, console, or otlp",
+    )
+    otlp_endpoint: str | None = Field(
+        default=None,
+        description="Optional OTLP HTTP endpoint (used when tracing_exporter=otlp).",
+    )
+
     # API
     api_prefix: str = Field(default="/api/v1", description="API route prefix")
 

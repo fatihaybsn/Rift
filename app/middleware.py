@@ -5,9 +5,14 @@
 import uuid
 from collections.abc import Callable
 
+import structlog
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
@@ -37,11 +42,23 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
         # Inject into request state for downstream access
         request.state.request_id = request_id
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id,
+            http_method=request.method,
+            http_path=request.url.path,
+        )
 
-        # Process the request
-        response = await call_next(request)
-
-        # Add request ID to response headers
-        response.headers[self.header_name] = request_id
-
-        return response
+        try:
+            response = await call_next(request)
+            response.headers[self.header_name] = request_id
+            return response
+        except Exception:
+            logger.exception(
+                "request_failed",
+                request_id=request_id,
+                http_method=request.method,
+                http_path=request.url.path,
+            )
+            raise
+        finally:
+            structlog.contextvars.clear_contextvars()

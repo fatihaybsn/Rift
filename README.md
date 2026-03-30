@@ -148,6 +148,50 @@ alembic downgrade base
 Migration tests use a real PostgreSQL database URL from `TEST_POSTGRES_DATABASE_URL`.
 For safety, the database name must include `test`.
 
+## Local observability (traces, metrics, logs)
+
+The service now includes practical MVP observability:
+
+- OpenTelemetry tracing for FastAPI requests
+- custom spans for run orchestration stages
+- Prometheus-style metrics at `GET /metrics`
+- structured JSON logs with request/trace correlation fields
+
+### 1) Run with local console tracing
+
+Set these environment variables (PowerShell example):
+
+```powershell
+$env:TRACING_EXPORTER="console"
+$env:LOG_LEVEL="INFO"
+uvicorn app.main:app --reload
+```
+
+Then hit endpoints (for example `/healthz` and one run processing flow) and watch spans printed to stdout.
+
+### 2) Run with OTLP tracing (optional)
+
+If you have a local OTLP collector:
+
+```powershell
+$env:TRACING_EXPORTER="otlp"
+$env:OTLP_ENDPOINT="http://localhost:4318/v1/traces"
+uvicorn app.main:app --reload
+```
+
+### 3) Inspect metrics
+
+Open:
+
+- `http://127.0.0.1:8000/metrics`
+
+Key metrics include:
+
+- `api_change_radar_runs_total`
+- `api_change_radar_run_duration_seconds`
+- `api_change_radar_run_failures_total`
+- `api_change_radar_breaking_findings_total`
+
 ## Repository status
 
 Current status: **pre-MVP / active build**

@@ -4,6 +4,7 @@ import logging
 import sys
 
 import structlog
+from opentelemetry import trace
 
 
 def configure_logging(log_level: str = "INFO") -> None:
@@ -19,11 +20,13 @@ def configure_logging(log_level: str = "INFO") -> None:
 
     structlog.configure(
         processors=[
+            structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.TimeStamper(fmt="iso"),
+            _add_trace_context,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
@@ -39,3 +42,16 @@ def configure_logging(log_level: str = "INFO") -> None:
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """Get a structured logger instance."""
     return structlog.get_logger(name)
+
+
+def _add_trace_context(
+    _logger: structlog.stdlib.BoundLogger,
+    _method_name: str,
+    event_dict: dict[str, object],
+) -> dict[str, object]:
+    span = trace.get_current_span()
+    span_context = span.get_span_context()
+    if span_context.is_valid:
+        event_dict["trace_id"] = f"{span_context.trace_id:032x}"
+        event_dict["span_id"] = f"{span_context.span_id:016x}"
+    return event_dict
