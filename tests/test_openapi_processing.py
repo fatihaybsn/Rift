@@ -7,6 +7,12 @@ import json
 import pytest
 
 from app.core.openapi_processing import OpenAPIProcessingError, parse_validate_and_normalize_openapi
+from tests.fixtures.invalid_specs import (
+    deferred_parameter_style_spec,
+    invalid_json_bytes,
+    invalid_openapi_missing_info,
+    unresolved_local_ref_spec,
+)
 
 
 def _build_base_spec() -> dict:
@@ -23,13 +29,15 @@ def _to_json_bytes(spec: dict) -> bytes:
 
 def test_parse_validate_normalize_rejects_invalid_json_and_yaml() -> None:
     with pytest.raises(OpenAPIProcessingError, match="invalid JSON/YAML input"):
-        parse_validate_and_normalize_openapi(b'{"openapi":', source="spec-under-test")
+        parse_validate_and_normalize_openapi(invalid_json_bytes(), source="spec-under-test")
 
 
 def test_parse_validate_normalize_rejects_invalid_openapi() -> None:
-    invalid_spec = {"openapi": "3.0.3", "paths": {}}
     with pytest.raises(OpenAPIProcessingError, match="invalid OpenAPI document"):
-        parse_validate_and_normalize_openapi(_to_json_bytes(invalid_spec), source="spec-under-test")
+        parse_validate_and_normalize_openapi(
+            _to_json_bytes(invalid_openapi_missing_info()),
+            source="spec-under-test",
+        )
 
 
 def test_normalization_parameter_identity_is_name_and_in() -> None:
@@ -326,24 +334,11 @@ def test_stable_ordering_for_paths_methods_params_responses_and_operations() -> 
 
 
 def test_unresolved_local_ref_fails_explicitly() -> None:
-    spec = _build_base_spec()
-    spec["paths"] = {
-        "/pets": {
-            "get": {
-                "responses": {
-                    "200": {
-                        "description": "ok",
-                        "content": {
-                            "application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}
-                        },
-                    }
-                },
-            }
-        }
-    }
-
     with pytest.raises(OpenAPIProcessingError, match="unresolved \\$ref"):
-        parse_validate_and_normalize_openapi(_to_json_bytes(spec), source="spec-under-test")
+        parse_validate_and_normalize_openapi(
+            _to_json_bytes(unresolved_local_ref_spec()),
+            source="spec-under-test",
+        )
 
 
 def test_response_schema_preserves_directional_read_only_write_only() -> None:
@@ -382,23 +377,8 @@ def test_response_schema_preserves_directional_read_only_write_only() -> None:
 
 
 def test_parameter_style_and_explode_non_default_fail_loudly() -> None:
-    spec = _build_base_spec()
-    spec["paths"] = {
-        "/users": {
-            "get": {
-                "parameters": [
-                    {
-                        "name": "tags",
-                        "in": "query",
-                        "required": False,
-                        "style": "pipeDelimited",
-                        "schema": {"type": "array", "items": {"type": "string"}},
-                    }
-                ],
-                "responses": {"200": {"description": "ok"}},
-            }
-        }
-    }
-
     with pytest.raises(OpenAPIProcessingError, match="intentionally deferred"):
-        parse_validate_and_normalize_openapi(_to_json_bytes(spec), source="spec-under-test")
+        parse_validate_and_normalize_openapi(
+            _to_json_bytes(deferred_parameter_style_spec()),
+            source="spec-under-test",
+        )

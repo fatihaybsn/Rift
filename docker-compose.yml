@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: radar
+      POSTGRES_PASSWORD: radar
+      POSTGRES_DB: api_change_radar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radar -d api_change_radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://radar:radar@db:5432/api_change_radar
+      TEST_POSTGRES_DATABASE_URL: postgresql+psycopg://radar:radar@db:5432/api_change_radar_test
+      PYTHONPATH: /workspace
+    working_dir: /workspace
+    command: >
+      sh -lc "
+      python -c 'import sqlalchemy as sa; e=sa.create_engine(\"postgresql+psycopg://radar:radar@db:5432/postgres\"); c=e.connect(); c.execution_options(isolation_level=\"AUTOCOMMIT\").execute(sa.text(\"CREATE DATABASE api_change_radar_test\")); c.close(); e.dispose()' || true &&
+      pytest -q tests/test_e2e_smoke.py -rs
+      "
+

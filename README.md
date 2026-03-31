@@ -148,6 +148,23 @@ alembic downgrade base
 Migration tests use a real PostgreSQL database URL from `TEST_POSTGRES_DATABASE_URL`.
 For safety, the database name must include `test`.
 
+## One-shot E2E smoke (Docker Compose)
+
+This repository includes a one-shot smoke command that exercises:
+
+- run creation API
+- orchestration processing path
+- report retrieval API
+
+Run:
+
+```bash
+make smoke-e2e
+```
+
+The command builds the test image, starts PostgreSQL, runs `tests/test_e2e_smoke.py`,
+and then tears down containers/volumes.
+
 ## Local observability (traces, metrics, logs)
 
 The service now includes practical MVP observability:
