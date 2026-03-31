@@ -18,7 +18,7 @@ from app.core.openapi_processing import (
     CanonicalResponse,
     CanonicalSchema,
 )
-from tests.fixtures_diff_engine import (
+from tests.fixtures.diff_snapshots import (
     build_composition_change_snapshots,
     build_operation_surface_snapshots,
     build_parameter_change_snapshots,

@@ -3,22 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import threading
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from queue import Queue
 
 import pytest
-import sqlalchemy as sa
-from alembic.config import Config
 from sqlalchemy import func, select
-from sqlalchemy.engine import URL, make_url
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from alembic import command
-from app.core.config import get_settings
 from app.db import (
     AnalysisRun,
     ArtifactKind,
@@ -28,7 +21,6 @@ from app.db import (
     RunStatus,
     SpecArtifact,
 )
-from app.db.session import reset_db_session_state
 from app.services.run_orchestration import (
     InProcessRunExecutor,
     PipelineStage,
@@ -37,115 +29,7 @@ from app.services.run_orchestration import (
     RunOrchestrationService,
     RunStageExecutionError,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-ALEMBIC_INI_PATH = REPO_ROOT / "alembic.ini"
-ALEMBIC_SCRIPT_LOCATION = REPO_ROOT / "alembic"
-TEST_DB_ENV_VAR = "TEST_POSTGRES_DATABASE_URL"
-
-
-def _build_valid_spec_json(*, title: str, include_patch: bool) -> bytes:
-    patch_part = (
-        """
-            "patch": {
-                "responses": {"200": {"description": "updated"}}
-            },
-        """
-        if include_patch
-        else ""
-    )
-    return f"""
-{{
-  "openapi": "3.0.3",
-  "info": {{"title": "{title}", "version": "1.0.0"}},
-  "paths": {{
-    "/pets": {{
-      "get": {{
-        "responses": {{
-          "200": {{
-            "description": "ok",
-            "content": {{
-              "application/json": {{
-                "schema": {{
-                  "type": "object",
-                  "properties": {{
-                    "status": {{"type": "string", "enum": ["active", "disabled"]}}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
-      }},
-      {patch_part}
-      "post": {{
-        "requestBody": {{
-          "required": false,
-          "content": {{
-            "application/json": {{
-              "schema": {{
-                "type": "object",
-                "properties": {{
-                  "name": {{"type": "string"}}
-                }}
-              }}
-            }}
-          }}
-        }},
-        "responses": {{"201": {{"description": "created"}}}}
-      }}
-    }}
-  }}
-}}
-""".encode()
-
-
-def _load_test_database_url() -> str:
-    test_database_url = os.getenv(TEST_DB_ENV_VAR)
-    if not test_database_url:
-        pytest.skip(f"{TEST_DB_ENV_VAR} is not set; skipping orchestration integration tests.")
-    return test_database_url
-
-
-def _assert_safe_test_database(url: URL) -> None:
-    database_name = (url.database or "").lower()
-    if "test" not in database_name:
-        msg = (
-            "Refusing to run integration test on a non-test database. "
-            f"Set {TEST_DB_ENV_VAR} to a database name containing 'test'."
-        )
-        raise RuntimeError(msg)
-
-
-def _build_alembic_config(database_url: str) -> Config:
-    config = Config(str(ALEMBIC_INI_PATH))
-    config.set_main_option("script_location", str(ALEMBIC_SCRIPT_LOCATION))
-    config.set_main_option("sqlalchemy.url", database_url)
-    return config
-
-
-def _reset_target_schema(database_url: str) -> None:
-    tables_to_drop = [
-        "audit_logs",
-        "migration_tasks",
-        "deterministic_findings",
-        "normalized_snapshots",
-        "spec_artifacts",
-        "analysis_runs",
-        "alembic_version",
-    ]
-    engine = sa.create_engine(database_url, isolation_level="AUTOCOMMIT")
-    with engine.connect() as connection:
-        for table_name in tables_to_drop:
-            connection.execute(sa.text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
-    engine.dispose()
-
-
-def _prepare_alembic_runtime(monkeypatch: pytest.MonkeyPatch, database_url: str) -> Config:
-    monkeypatch.setenv("DATABASE_URL", database_url)
-    get_settings.cache_clear()
-    reset_db_session_state()
-    return _build_alembic_config(database_url)
+from tests.fixtures.sample_specs import build_valid_spec_json
 
 
 def _insert_run_with_specs(
@@ -195,37 +79,13 @@ def _insert_run_with_specs(
     return run.id
 
 
-@pytest.fixture()
-def integration_db(monkeypatch: pytest.MonkeyPatch):
-    test_database_url = _load_test_database_url()
-    parsed_url = make_url(test_database_url)
-    _assert_safe_test_database(parsed_url)
-    _reset_target_schema(test_database_url)
-    alembic_config = _prepare_alembic_runtime(monkeypatch, test_database_url)
-    command.upgrade(alembic_config, "head")
-    engine = sa.create_engine(test_database_url)
-    session_factory = sessionmaker(
-        bind=engine,
-        autoflush=False,
-        autocommit=False,
-        expire_on_commit=False,
-    )
-    try:
-        yield session_factory
-    finally:
-        engine.dispose()
-        command.downgrade(alembic_config, "base")
-        reset_db_session_state()
-        get_settings.cache_clear()
-
-
 def test_orchestration_success_path_persists_findings_and_completes_run(integration_db) -> None:
     session = integration_db()
     try:
         run_id = _insert_run_with_specs(
             session=session,
-            old_spec_bytes=_build_valid_spec_json(title="Old API", include_patch=False),
-            new_spec_bytes=_build_valid_spec_json(title="New API", include_patch=True),
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
         )
     finally:
         session.close()
@@ -296,9 +156,7 @@ def test_orchestration_success_path_persists_findings_and_completes_run(integrat
         assert status_events[0]["to_status"] == RunStatus.PROCESSING.value
         assert status_events[1]["from_status"] == RunStatus.PROCESSING.value
         assert status_events[1]["to_status"] == RunStatus.COMPLETED.value
-        observed_stage_transitions = [
-            (item["stage"], item["transition"]) for item in stage_events
-        ]
+        observed_stage_transitions = [(item["stage"], item["transition"]) for item in stage_events]
         assert observed_stage_transitions == expected_stage_transitions
         assert all(item["attempt_count"] == 1 for item in stage_events)
     finally:
@@ -311,7 +169,7 @@ def test_orchestration_invalid_spec_records_failure_stage_and_error_code(integra
         run_id = _insert_run_with_specs(
             session=session,
             old_spec_bytes=b'{"openapi":',
-            new_spec_bytes=_build_valid_spec_json(title="New API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=False),
         )
     finally:
         session.close()
@@ -372,8 +230,8 @@ def test_orchestration_duplicate_processing_protection(integration_db) -> None:
     try:
         run_id = _insert_run_with_specs(
             session=session,
-            old_spec_bytes=_build_valid_spec_json(title="Old API", include_patch=False),
-            new_spec_bytes=_build_valid_spec_json(title="New API", include_patch=False),
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=False),
             status=RunStatus.PROCESSING.value,
         )
         run = session.get(AnalysisRun, run_id)
@@ -399,8 +257,8 @@ def test_orchestration_reprocessing_completed_run_returns_domain_error(integrati
     try:
         run_id = _insert_run_with_specs(
             session=session,
-            old_spec_bytes=_build_valid_spec_json(title="Old API", include_patch=False),
-            new_spec_bytes=_build_valid_spec_json(title="New API", include_patch=True),
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
         )
     finally:
         session.close()
@@ -427,8 +285,8 @@ def test_orchestration_concurrent_claim_allows_only_one_processor(integration_db
     try:
         run_id = _insert_run_with_specs(
             session=session,
-            old_spec_bytes=_build_valid_spec_json(title="Old API", include_patch=False),
-            new_spec_bytes=_build_valid_spec_json(title="New API", include_patch=True),
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
         )
     finally:
         session.close()

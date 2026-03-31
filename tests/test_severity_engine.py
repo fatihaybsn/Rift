@@ -12,7 +12,7 @@ from app.core.diff_engine import (
     diff_canonical_snapshots,
 )
 from app.core.severity_engine import SeverityLevel, classify_finding_severity, classify_findings
-from tests.fixtures_diff_engine import (
+from tests.fixtures.diff_snapshots import (
     build_operation_surface_snapshots,
     build_request_change_snapshots,
     build_response_change_snapshots,
@@ -110,30 +110,42 @@ def test_enum_shrink_uses_context_model_request_high_response_medium() -> None:
 
 
 def test_fallback_compatibility_mapping_is_explicit() -> None:
-    assert classify_finding_severity(
-        _make_finding(
-            code=FindingCode.METHOD_ADDED,
-            compatibility=CompatibilityClassification.NON_BREAKING,
-        )
-    ).severity is SeverityLevel.LOW
-    assert classify_finding_severity(
-        _make_finding(
-            code=FindingCode.PARAMETER_SCHEMA_CHANGED,
-            compatibility=CompatibilityClassification.POTENTIALLY_BREAKING,
-        )
-    ).severity is SeverityLevel.MEDIUM
-    assert classify_finding_severity(
-        _make_finding(
-            code=FindingCode.PARAMETER_REQUIRED_CHANGED,
-            compatibility=CompatibilityClassification.BREAKING,
-        )
-    ).severity is SeverityLevel.HIGH
-    assert classify_finding_severity(
-        _make_finding(
-            code=FindingCode.COMPOSITION_ONEOF_CHANGED,
-            compatibility=CompatibilityClassification.UNKNOWN,
-        )
-    ).severity is SeverityLevel.MEDIUM
+    assert (
+        classify_finding_severity(
+            _make_finding(
+                code=FindingCode.METHOD_ADDED,
+                compatibility=CompatibilityClassification.NON_BREAKING,
+            )
+        ).severity
+        is SeverityLevel.LOW
+    )
+    assert (
+        classify_finding_severity(
+            _make_finding(
+                code=FindingCode.PARAMETER_SCHEMA_CHANGED,
+                compatibility=CompatibilityClassification.POTENTIALLY_BREAKING,
+            )
+        ).severity
+        is SeverityLevel.MEDIUM
+    )
+    assert (
+        classify_finding_severity(
+            _make_finding(
+                code=FindingCode.PARAMETER_REQUIRED_CHANGED,
+                compatibility=CompatibilityClassification.BREAKING,
+            )
+        ).severity
+        is SeverityLevel.HIGH
+    )
+    assert (
+        classify_finding_severity(
+            _make_finding(
+                code=FindingCode.COMPOSITION_ONEOF_CHANGED,
+                compatibility=CompatibilityClassification.UNKNOWN,
+            )
+        ).severity
+        is SeverityLevel.MEDIUM
+    )
 
 
 def test_classify_findings_preserves_order_and_adds_explanations() -> None:
