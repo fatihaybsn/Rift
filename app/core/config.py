@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     # Request correlation
     request_id_header: str = Field(default="X-Request-ID", description="Header name for request ID")
 
+    # Optional AI changelog interpretation
+    llm_changelog_interpreter_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable optional LLM changelog interpretation. Deterministic findings "
+            "and run lifecycle state remain authoritative."
+        ),
+    )
+    llm_low_confidence_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Confidence threshold below which AI output requires manual review.",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

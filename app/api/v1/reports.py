@@ -110,6 +110,28 @@ class ChangelogTaskItem(BaseModel):
     updated_at: datetime
 
 
+class LLMTaskItem(BaseModel):
+    """AI-generated migration task suggestion."""
+
+    title: str
+    detail: str
+    priority: int
+
+
+class LLMMetadata(BaseModel):
+    """Optional AI enrichment metadata stored separately from deterministic findings."""
+
+    status: str
+    summary: str | None
+    migration_tasks: list[LLMTaskItem]
+    confidence: float | None
+    error_code: str | None
+    provider: str | None
+    model: str | None
+    completed_at: datetime | None
+    explanation: str | None
+
+
 class ChangelogTasksSection(BaseModel):
     """Optional placeholder for changelog-derived tasks."""
 
@@ -128,6 +150,7 @@ class ReportReadResponse(BaseModel):
     severity_breakdown: SeverityBreakdown
     findings_grouped: list[ReportSeverityFindingGroup]
     changelog_tasks: ChangelogTasksSection
+    llm: LLMMetadata
 
 
 def _get_run_or_404(*, db: Session, run_id: uuid.UUID) -> AnalysisRun:
@@ -251,6 +274,28 @@ def _build_report_response(
         for task in changelog_tasks
     ]
 
+    llm_migration_tasks_raw = run.llm_migration_tasks or []
+    llm_migration_tasks = []
+    for item in llm_migration_tasks_raw:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        detail = item.get("detail")
+        priority = item.get("priority")
+        if (
+            not isinstance(title, str)
+            or not isinstance(detail, str)
+            or not isinstance(priority, int)
+        ):
+            continue
+        llm_migration_tasks.append(LLMTaskItem(title=title, detail=detail, priority=priority))
+
+    llm_explanation: str | None = run.llm_explanation
+    if run.llm_status == "manual_review_required":
+        llm_explanation = llm_explanation or "AI output requires manual review."
+    if run.llm_error_code is not None:
+        llm_explanation = f"AI enrichment error: {run.llm_error_code}."
+
     return ReportReadResponse(
         report_id=run.id,
         run_id=run.id,
@@ -279,6 +324,17 @@ def _build_report_response(
                 "Deterministic findings remain authoritative."
             ),
             items=task_items,
+        ),
+        llm=LLMMetadata(
+            status=run.llm_status,
+            summary=run.llm_summary,
+            migration_tasks=llm_migration_tasks,
+            confidence=run.llm_confidence,
+            error_code=run.llm_error_code,
+            provider=run.llm_provider,
+            model=run.llm_model,
+            completed_at=run.llm_completed_at,
+            explanation=llm_explanation,
         ),
     )
 
@@ -358,6 +414,36 @@ def _render_report_markdown(report: ReportReadResponse) -> str:
             if task.finding_id is not None:
                 lines.append(f"   - Related finding: `{task.finding_id}`")
             lines.append(f"   - Detail: {task.detail}")
+
+    lines.extend(
+        [
+            "",
+            "## Optional AI Changelog Enrichment",
+            f"- Status: `{report.llm.status}`",
+        ]
+    )
+    if report.llm.summary is not None:
+        lines.append(f"- Summary: {report.llm.summary}")
+    if report.llm.confidence is not None:
+        lines.append(f"- Confidence: {report.llm.confidence}")
+    if report.llm.provider is not None:
+        lines.append(f"- Provider: `{report.llm.provider}`")
+    if report.llm.model is not None:
+        lines.append(f"- Model: `{report.llm.model}`")
+    if report.llm.completed_at is not None:
+        lines.append(f"- Completed At: `{report.llm.completed_at.isoformat()}`")
+    if report.llm.error_code is not None:
+        lines.append(f"- Error Code: `{report.llm.error_code}`")
+    if report.llm.explanation is not None:
+        lines.append(f"- Note: {report.llm.explanation}")
+
+    if not report.llm.migration_tasks:
+        lines.append("- AI Migration Tasks: _none_")
+    else:
+        lines.append("- AI Migration Tasks:")
+        for index, task in enumerate(report.llm.migration_tasks, start=1):
+            lines.append(f"  {index}. [priority={task.priority}] {task.title}")
+            lines.append(f"     - Detail: {task.detail}")
     return "\n".join(lines)
 
 
@@ -449,6 +535,18 @@ def _render_report_demo_html(
 
     lines.extend(
         [
+            "    </section>",
+            "    <section>",
+            "      <h2>Optional AI Changelog Enrichment</h2>",
+            f"      <p><strong>Status:</strong> {escape(report.llm.status)}</p>",
+            (
+                "      <p><strong>Summary:</strong> "
+                f"{escape(report.llm.summary) if report.llm.summary else 'N/A'}</p>"
+            ),
+            (
+                "      <p><strong>Confidence:</strong> "
+                f"{report.llm.confidence if report.llm.confidence is not None else 'N/A'}</p>"
+            ),
             "    </section>",
             "    <section>",
             "      <h2>Raw Report Links</h2>",

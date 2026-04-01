@@ -58,6 +58,7 @@ def test_full_stack_smoke_run_to_report(integration_db) -> None:
             run_response = client.get(f"{Settings().api_prefix}/runs/{run_id}")
             assert run_response.status_code == 200
             assert run_response.json()["status"] == "completed"
+            assert run_response.json()["llm_status"] == "disabled"
 
             report_response = client.get(f"{Settings().api_prefix}/reports/{run_id}")
             assert report_response.status_code == 200
@@ -65,6 +66,7 @@ def test_full_stack_smoke_run_to_report(integration_db) -> None:
             assert report_payload["run_id"] == run_id
             assert report_payload["status"] == "completed"
             assert report_payload["summary_counts"]["total_findings"] >= 1
+            assert report_payload["llm"]["status"] == "disabled"
 
             markdown_response = client.get(
                 f"{Settings().api_prefix}/reports/{run_id}?format=markdown"

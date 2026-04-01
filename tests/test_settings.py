@@ -18,3 +18,12 @@ def test_database_url_reads_environment_override(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("DATABASE_URL", custom_url)
     settings = Settings(_env_file=None)
     assert settings.database_url == custom_url
+
+
+def test_llm_feature_flags_have_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_CHANGELOG_INTERPRETER_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_LOW_CONFIDENCE_THRESHOLD", raising=False)
+
+    settings = Settings(_env_file=None)
+    assert settings.llm_changelog_interpreter_enabled is False
+    assert settings.llm_low_confidence_threshold == 0.6

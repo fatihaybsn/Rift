@@ -66,6 +66,15 @@ class RunReadResponse(BaseModel):
     failure_stage: str | None
     error_code: str | None
     failure_reason: str | None
+    llm_status: str
+    llm_summary: str | None
+    llm_migration_tasks: list[dict[str, object]] | None
+    llm_confidence: float | None
+    llm_explanation: str | None
+    llm_error_code: str | None
+    llm_provider: str | None
+    llm_model: str | None
+    llm_completed_at: datetime | None
 
 
 def _normalize_media_type(content_type: str | None) -> str:
@@ -223,4 +232,13 @@ def get_analysis_run(
         failure_stage=run.failure_stage,
         error_code=run.error_code,
         failure_reason=run.failure_reason,
+        llm_status=run.llm_status,
+        llm_summary=run.llm_summary,
+        llm_migration_tasks=run.llm_migration_tasks,
+        llm_confidence=run.llm_confidence,
+        llm_explanation=run.llm_explanation,
+        llm_error_code=run.llm_error_code,
+        llm_provider=run.llm_provider,
+        llm_model=run.llm_model,
+        llm_completed_at=run.llm_completed_at,
     )

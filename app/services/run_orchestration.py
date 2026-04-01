@@ -15,6 +15,7 @@ from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
 from app.core.diff_engine import CompatibilityClassification, diff_canonical_snapshots
 from app.core.openapi_processing import (
     CanonicalOpenAPISnapshot,
@@ -29,6 +30,7 @@ from app.db import (
     ArtifactKind,
     AuditLog,
     DeterministicFinding,
+    LLMStatus,
     NormalizedSnapshot,
     RunStatus,
     SnapshotKind,
@@ -36,6 +38,12 @@ from app.db import (
 )
 from app.logging import get_logger
 from app.observability import get_tracer, record_run_failure, record_run_success
+from app.services.changelog_interpreter import (
+    ChangelogInterpretationProvider,
+    ChangelogPromptBuilder,
+    ChangelogTaskSuggestion,
+    NoLLMChangelogProvider,
+)
 
 logger = get_logger(__name__)
 tracer = get_tracer(__name__)
@@ -328,8 +336,18 @@ class InProcessRunExecutor:
 class RunOrchestrationService:
     """Application service orchestrating run lifecycle transitions."""
 
-    def __init__(self, *, executor: RunExecutor | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        executor: RunExecutor | None = None,
+        settings: Settings | None = None,
+        changelog_prompt_builder: ChangelogPromptBuilder | None = None,
+        changelog_provider: ChangelogInterpretationProvider | None = None,
+    ) -> None:
         self._executor = executor or InProcessRunExecutor()
+        self._settings = settings or get_settings()
+        self._changelog_prompt_builder = changelog_prompt_builder or ChangelogPromptBuilder()
+        self._changelog_provider = changelog_provider or NoLLMChangelogProvider()
 
     def process_run(self, *, db: Session, run_id: uuid.UUID) -> AnalysisRun:
         """Process one run synchronously from pending to completed/failed."""
@@ -404,6 +422,21 @@ class RunOrchestrationService:
                     breaking_change_count=breaking_change_count,
                     duration_seconds=duration_seconds,
                 )
+                try:
+                    self._apply_optional_llm_enrichment(
+                        db=db,
+                        run=run,
+                        run_logger=run_logger,
+                    )
+                except Exception as llm_exc:  # pragma: no cover - defensive safety net
+                    self._mark_llm_failed_best_effort(
+                        db=db,
+                        run=run,
+                        error_code="llm_enrichment_error",
+                        provider=self._changelog_provider.__class__.__name__,
+                        run_logger=run_logger,
+                        message=str(llm_exc),
+                    )
                 return run
             except RunStageExecutionError as exc:
                 db.rollback()
@@ -731,6 +764,208 @@ class RunOrchestrationService:
         setter = getattr(self._executor, "set_stage_event_callback", None)
         if callable(setter):
             setter(callback)
+
+    def _apply_optional_llm_enrichment(
+        self,
+        *,
+        db: Session,
+        run: AnalysisRun,
+        run_logger: Any,
+    ) -> None:
+        if not self._settings.llm_changelog_interpreter_enabled:
+            self._set_llm_result(
+                db=db,
+                run=run,
+                llm_status=LLMStatus.DISABLED,
+                llm_summary=None,
+                llm_migration_tasks=None,
+                llm_confidence=None,
+                llm_explanation=None,
+                llm_error_code=None,
+                llm_provider=None,
+                llm_model=None,
+                llm_completed_at=None,
+            )
+            run_logger.info("run_llm_enrichment_disabled")
+            return
+
+        changelog_text = self._load_changelog_text(db=db, run_id=run.id)
+        if changelog_text is None:
+            self._set_llm_result(
+                db=db,
+                run=run,
+                llm_status=LLMStatus.NOT_REQUESTED,
+                llm_summary=None,
+                llm_migration_tasks=None,
+                llm_confidence=None,
+                llm_explanation=None,
+                llm_error_code=None,
+                llm_provider=None,
+                llm_model=None,
+                llm_completed_at=None,
+            )
+            run_logger.info("run_llm_enrichment_not_requested")
+            return
+
+        self._set_llm_result(
+            db=db,
+            run=run,
+            llm_status=LLMStatus.PENDING,
+            llm_summary=None,
+            llm_migration_tasks=None,
+            llm_confidence=None,
+            llm_explanation=None,
+            llm_error_code=None,
+            llm_provider=None,
+            llm_model=None,
+            llm_completed_at=None,
+        )
+
+        prompt = self._changelog_prompt_builder.build_prompt(changelog_text=changelog_text)
+        try:
+            result = self._changelog_provider.interpret(
+                prompt=prompt,
+                changelog_text=changelog_text,
+            )
+        except Exception as exc:
+            self._set_llm_result(
+                db=db,
+                run=run,
+                llm_status=LLMStatus.FAILED,
+                llm_summary=None,
+                llm_migration_tasks=None,
+                llm_confidence=None,
+                llm_explanation=None,
+                llm_error_code="llm_provider_error",
+                llm_provider=self._changelog_provider.__class__.__name__,
+                llm_model=None,
+                llm_completed_at=datetime.now(tz=UTC),
+            )
+            run_logger.exception(
+                "run_llm_enrichment_failed",
+                error_code="llm_provider_error",
+                error_message=str(exc),
+            )
+            return
+
+        llm_status = (
+            LLMStatus.MANUAL_REVIEW_REQUIRED
+            if (
+                result.requires_manual_review
+                or result.confidence < self._settings.llm_low_confidence_threshold
+            )
+            else LLMStatus.COMPLETED
+        )
+        task_payload = [self._serialize_llm_task(item) for item in result.migration_tasks]
+        self._set_llm_result(
+            db=db,
+            run=run,
+            llm_status=llm_status,
+            llm_summary=result.summary,
+            llm_migration_tasks=task_payload,
+            llm_confidence=result.confidence,
+            llm_explanation=result.explanation,
+            llm_error_code=None,
+            llm_provider=result.provider,
+            llm_model=result.model,
+            llm_completed_at=datetime.now(tz=UTC),
+        )
+        run_logger.info(
+            "run_llm_enrichment_completed",
+            llm_status=llm_status.value,
+            llm_confidence=result.confidence,
+            llm_task_count=len(task_payload),
+        )
+
+    def _set_llm_result(
+        self,
+        *,
+        db: Session,
+        run: AnalysisRun,
+        llm_status: LLMStatus,
+        llm_summary: str | None,
+        llm_migration_tasks: list[dict[str, Any]] | None,
+        llm_confidence: float | None,
+        llm_explanation: str | None,
+        llm_error_code: str | None,
+        llm_provider: str | None,
+        llm_model: str | None,
+        llm_completed_at: datetime | None,
+    ) -> None:
+        run.llm_status = llm_status.value
+        run.llm_summary = llm_summary
+        run.llm_migration_tasks = llm_migration_tasks
+        run.llm_confidence = llm_confidence
+        run.llm_explanation = llm_explanation
+        run.llm_error_code = llm_error_code
+        run.llm_provider = llm_provider
+        run.llm_model = llm_model
+        run.llm_completed_at = llm_completed_at
+        db.commit()
+        db.refresh(run)
+
+    def _load_changelog_text(self, *, db: Session, run_id: uuid.UUID) -> str | None:
+        artifact = (
+            db.execute(
+                select(SpecArtifact).where(
+                    SpecArtifact.run_id == run_id,
+                    SpecArtifact.kind == ArtifactKind.CHANGELOG_TEXT,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if artifact is None or artifact.payload_text is None:
+            return None
+        if not artifact.payload_text.strip():
+            return None
+        return artifact.payload_text
+
+    def _serialize_llm_task(self, item: ChangelogTaskSuggestion) -> dict[str, Any]:
+        return {
+            "title": item.title,
+            "detail": item.detail,
+            "priority": item.priority,
+        }
+
+    def _mark_llm_failed_best_effort(
+        self,
+        *,
+        db: Session,
+        run: AnalysisRun,
+        error_code: str,
+        provider: str,
+        run_logger: Any,
+        message: str,
+    ) -> None:
+        try:
+            db.rollback()
+            self._set_llm_result(
+                db=db,
+                run=run,
+                llm_status=LLMStatus.FAILED,
+                llm_summary=None,
+                llm_migration_tasks=None,
+                llm_confidence=None,
+                llm_explanation=None,
+                llm_error_code=error_code,
+                llm_provider=provider,
+                llm_model=None,
+                llm_completed_at=datetime.now(tz=UTC),
+            )
+        except Exception:
+            db.rollback()
+            run_logger.exception(
+                "run_llm_enrichment_failed_to_persist_failure_state",
+                error_code=error_code,
+            )
+            return
+
+        run_logger.exception(
+            "run_llm_enrichment_failed",
+            error_code=error_code,
+            error_message=message,
+        )
 
 
 def _build_finding_key(*, order: int, sort_key: str) -> str:

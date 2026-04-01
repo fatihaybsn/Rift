@@ -124,6 +124,40 @@ high-severity findings, and links to authoritative raw report outputs:
 - JSON: `GET /api/v1/reports/{report_id}`
 - Markdown: `GET /api/v1/reports/{report_id}?format=markdown`
 
+## Optional AI changelog interpreter (feature-flagged)
+
+AI changelog interpretation is optional and non-authoritative. Deterministic
+findings, severity decisions, and `run_status` remain the source of truth.
+
+Enable via environment:
+
+```bash
+LLM_CHANGELOG_INTERPRETER_ENABLED=true
+LLM_LOW_CONFIDENCE_THRESHOLD=0.6
+```
+
+When enabled and changelog text exists, AI output is stored separately on the
+run/report as:
+
+- `llm_summary`
+- `llm_migration_tasks`
+- `llm_confidence`
+- `llm_explanation`
+- `llm_status`
+- `llm_error_code`
+- `llm_provider`
+- `llm_model`
+- `llm_completed_at`
+
+`llm_status` values:
+
+- `not_requested`
+- `disabled`
+- `pending`
+- `completed`
+- `manual_review_required`
+- `failed`
+
 ## Local database configuration
 
 Create a local `.env` from the template and set your PostgreSQL role/password:

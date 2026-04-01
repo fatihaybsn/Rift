@@ -83,6 +83,7 @@ def test_get_report_json_integration_returns_persisted_grouped_shape(integration
         assert body["summary_counts"]["total_findings"] > 0
         assert body["severity_breakdown"]["high"] >= 0
         assert body["findings_grouped"]
+        assert body["llm"]["status"] == "disabled"
         severities = [item["severity"] for item in body["findings_grouped"]]
         assert severities == sorted(
             severities,

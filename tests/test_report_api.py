@@ -87,6 +87,47 @@ def _build_sample_run(*, run_id: uuid.UUID, status: str) -> AnalysisRun:
         failure_stage="parse_spec_old" if status == "failed" else None,
         error_code="openapi_parse_error" if status == "failed" else None,
         failure_reason="invalid JSON input" if status == "failed" else None,
+        llm_status="not_requested",
+        llm_summary=None,
+        llm_migration_tasks=None,
+        llm_confidence=None,
+        llm_explanation=None,
+        llm_error_code=None,
+        llm_provider=None,
+        llm_model=None,
+        llm_completed_at=None,
+    )
+
+
+def _build_llm_enriched_run(*, run_id: uuid.UUID) -> AnalysisRun:
+    now = datetime(2026, 3, 20, 12, 45, tzinfo=UTC)
+    return AnalysisRun(
+        id=run_id,
+        status="completed",
+        attempt_count=1,
+        created_at=now,
+        updated_at=now,
+        processing_started_at=now,
+        completed_at=now,
+        failed_at=None,
+        failure_stage=None,
+        error_code=None,
+        failure_reason=None,
+        llm_status="manual_review_required",
+        llm_summary="Possible migration risk in changelog wording.",
+        llm_migration_tasks=[
+            {
+                "title": "Review request schema updates",
+                "detail": "Verify required fields.",
+                "priority": 1,
+            }
+        ],
+        llm_confidence=0.4,
+        llm_explanation="Low-confidence migration wording in changelog.",
+        llm_error_code=None,
+        llm_provider="mock",
+        llm_model="mock-v1",
+        llm_completed_at=now,
     )
 
 
@@ -165,6 +206,9 @@ def test_get_run_returns_persisted_lifecycle_state() -> None:
     assert body["failure_stage"] == "parse_spec_old"
     assert body["error_code"] == "openapi_parse_error"
     assert body["failure_reason"] == "invalid JSON input"
+    assert body["llm_status"] == "not_requested"
+    assert body["llm_summary"] is None
+    assert body["llm_explanation"] is None
 
 
 def test_get_run_returns_404_for_unknown_id() -> None:
@@ -227,6 +271,17 @@ def test_get_report_json_returns_stable_grouped_shape() -> None:
     )
     assert body["findings_grouped"][1]["categories"][0]["items"][0]["code"] == "parameter_added"
     assert body["changelog_tasks"]["items"] == []
+    assert body["llm"] == {
+        "status": "not_requested",
+        "summary": None,
+        "migration_tasks": [],
+        "confidence": None,
+        "error_code": None,
+        "provider": None,
+        "model": None,
+        "completed_at": None,
+        "explanation": None,
+    }
 
 
 def test_get_report_returns_404_for_unknown_id() -> None:
@@ -307,6 +362,10 @@ def test_get_report_markdown_snapshot_output() -> None:
             "   - Task ID: `33333333-3333-3333-3333-333333333333`",
             "   - Related finding: `11111111-1111-1111-1111-111111111111`",
             "   - Detail: Ensure removed method is no longer called.",
+            "",
+            "## Optional AI Changelog Enrichment",
+            "- Status: `not_requested`",
+            "- AI Migration Tasks: _none_",
         ]
     )
     assert response.text == expected
@@ -397,3 +456,31 @@ def test_get_demo_runs_route_returns_same_minimal_html() -> None:
         f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">'
         "Markdown</a>"
     ) in body
+
+
+def test_get_report_json_includes_separate_llm_fields() -> None:
+    run_id = uuid.UUID("16161616-1616-1616-1616-161616161616")
+    fake_session = FakeReadSession(
+        run=_build_llm_enriched_run(run_id=run_id),
+        findings=_build_sample_findings(run_id),
+        migration_tasks=[],
+    )
+
+    with _build_client_with_fake_session(fake_session) as client:
+        response = client.get(f"{Settings().api_prefix}/reports/{run_id}")
+
+    assert response.status_code == 200
+    llm = response.json()["llm"]
+    assert llm["status"] == "manual_review_required"
+    assert llm["summary"] == "Possible migration risk in changelog wording."
+    assert llm["confidence"] == 0.4
+    assert llm["provider"] == "mock"
+    assert llm["model"] == "mock-v1"
+    assert llm["explanation"] == "Low-confidence migration wording in changelog."
+    assert llm["migration_tasks"] == [
+        {
+            "title": "Review request schema updates",
+            "detail": "Verify required fields.",
+            "priority": 1,
+        }
+    ]

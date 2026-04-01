@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
 from app.db import (
     AnalysisRun,
     ArtifactKind,
@@ -20,6 +21,10 @@ from app.db import (
     NormalizedSnapshot,
     RunStatus,
     SpecArtifact,
+)
+from app.services.changelog_interpreter import (
+    ChangelogInterpretationResult,
+    ChangelogTaskSuggestion,
 )
 from app.services.run_orchestration import (
     InProcessRunExecutor,
@@ -77,6 +82,42 @@ def _insert_run_with_specs(
     session.add(new_artifact)
     session.commit()
     return run.id
+
+
+def _insert_changelog_artifact(*, session: Session, run_id: uuid.UUID, changelog_text: str) -> None:
+    encoded = changelog_text.encode("utf-8")
+    session.add(
+        SpecArtifact(
+            run_id=run_id,
+            kind=ArtifactKind.CHANGELOG_TEXT,
+            filename=None,
+            media_type="text/plain",
+            sha256=hashlib.sha256(encoded).hexdigest(),
+            byte_size=len(encoded),
+            payload_bytes=None,
+            payload_text=changelog_text,
+        )
+    )
+    session.commit()
+
+
+class _MockChangelogProvider:
+    def __init__(
+        self,
+        *,
+        result: ChangelogInterpretationResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._result = result
+        self._error = error
+
+    def interpret(self, *, prompt: str, changelog_text: str) -> ChangelogInterpretationResult:
+        assert "Interpret changelog text only" in prompt
+        assert changelog_text
+        if self._error is not None:
+            raise self._error
+        assert self._result is not None
+        return self._result
 
 
 def test_orchestration_success_path_persists_findings_and_completes_run(integration_db) -> None:
@@ -333,3 +374,359 @@ def test_orchestration_concurrent_claim_allows_only_one_processor(integration_db
     if isinstance(result, Exception):
         raise result
     assert result == RunStatus.COMPLETED.value
+
+
+def test_llm_feature_flag_off_sets_disabled_without_mutating_run_status(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id,
+            changelog_text="Removed deprecated endpoint and renamed response field.",
+        )
+    finally:
+        session.close()
+
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=False,
+        )
+        run = RunOrchestrationService(settings=settings).process_run(db=session, run_id=run_id)
+
+        assert run.status == RunStatus.COMPLETED.value
+        assert run.llm_status == "disabled"
+        assert run.llm_summary is None
+        assert run.llm_migration_tasks is None
+        assert run.llm_confidence is None
+        assert run.llm_explanation is None
+        assert run.llm_error_code is None
+    finally:
+        session.close()
+
+
+def test_llm_feature_flag_on_with_mock_response_persists_separate_ai_fields(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id,
+            changelog_text="Patch endpoint added; old endpoint removed.",
+        )
+    finally:
+        session.close()
+
+    provider = _MockChangelogProvider(
+        result=ChangelogInterpretationResult(
+            summary="Changelog indicates endpoint replacement and request updates.",
+            migration_tasks=(
+                ChangelogTaskSuggestion(
+                    title="Update endpoint calls",
+                    detail="Switch consumers to the new patch endpoint.",
+                    priority=1,
+                ),
+                ChangelogTaskSuggestion(
+                    title="Validate request payload mapping",
+                    detail="Confirm required request fields for replacement endpoint.",
+                    priority=2,
+                ),
+            ),
+            confidence=0.91,
+            explanation="High overlap with deterministic findings in changelog text.",
+            requires_manual_review=False,
+            provider="mock",
+            model="mock-1",
+        )
+    )
+
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+            llm_low_confidence_threshold=0.6,
+        )
+        run = RunOrchestrationService(settings=settings, changelog_provider=provider).process_run(
+            db=session,
+            run_id=run_id,
+        )
+
+        assert run.status == RunStatus.COMPLETED.value
+        assert run.llm_status == "completed"
+        assert run.llm_summary is not None
+        assert run.llm_confidence == 0.91
+        assert run.llm_explanation == "High overlap with deterministic findings in changelog text."
+        assert run.llm_provider == "mock"
+        assert run.llm_model == "mock-1"
+        assert run.llm_completed_at is not None
+        assert isinstance(run.llm_migration_tasks, list)
+        assert len(run.llm_migration_tasks) == 2
+    finally:
+        session.close()
+
+
+def test_llm_low_confidence_maps_to_manual_review_required_only(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id,
+            changelog_text="Potentially risky contract updates.",
+        )
+    finally:
+        session.close()
+
+    provider = _MockChangelogProvider(
+        result=ChangelogInterpretationResult(
+            summary="Potential contract risk noted in changelog.",
+            migration_tasks=(),
+            confidence=0.34,
+            explanation="Unclear migration language.",
+            requires_manual_review=False,
+            provider="mock",
+            model="mock-low",
+        )
+    )
+
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+            llm_low_confidence_threshold=0.6,
+        )
+        run = RunOrchestrationService(settings=settings, changelog_provider=provider).process_run(
+            db=session,
+            run_id=run_id,
+        )
+
+        assert run.status == RunStatus.COMPLETED.value
+        assert run.llm_status == "manual_review_required"
+        assert run.llm_explanation == "Unclear migration language."
+        assert run.llm_error_code is None
+    finally:
+        session.close()
+
+
+def test_llm_provider_failure_falls_back_without_mutating_run_status(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id,
+            changelog_text="Breaking changes described with sparse detail.",
+        )
+    finally:
+        session.close()
+
+    provider = _MockChangelogProvider(error=RuntimeError("provider unavailable"))
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+        )
+        run = RunOrchestrationService(settings=settings, changelog_provider=provider).process_run(
+            db=session,
+            run_id=run_id,
+        )
+
+        assert run.status == RunStatus.COMPLETED.value
+        assert run.llm_status == "failed"
+        assert run.llm_error_code == "llm_provider_error"
+        assert run.llm_summary is None
+        assert run.llm_confidence is None
+        assert run.llm_explanation is None
+    finally:
+        session.close()
+
+
+def test_enabling_llm_does_not_change_deterministic_findings(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id_without_llm = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        run_id_with_llm = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id_with_llm,
+            changelog_text="Endpoint replacement and schema updates.",
+        )
+    finally:
+        session.close()
+
+    session = integration_db()
+    try:
+        baseline_settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=False,
+        )
+        baseline_run = RunOrchestrationService(settings=baseline_settings).process_run(
+            db=session,
+            run_id=run_id_without_llm,
+        )
+        baseline_findings = (
+            session.execute(
+                select(DeterministicFinding)
+                .where(DeterministicFinding.run_id == baseline_run.id)
+                .order_by(DeterministicFinding.finding_order, DeterministicFinding.finding_key)
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        session.close()
+
+    provider = _MockChangelogProvider(
+        result=ChangelogInterpretationResult(
+            summary="High-level migration notes.",
+            migration_tasks=(),
+            confidence=0.88,
+            explanation="Strong textual match.",
+            requires_manual_review=False,
+            provider="mock",
+            model="mock-determinism",
+        )
+    )
+    session = integration_db()
+    try:
+        llm_settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+        )
+        llm_run = RunOrchestrationService(
+            settings=llm_settings,
+            changelog_provider=provider,
+        ).process_run(db=session, run_id=run_id_with_llm)
+        llm_findings = (
+            session.execute(
+                select(DeterministicFinding)
+                .where(DeterministicFinding.run_id == llm_run.id)
+                .order_by(DeterministicFinding.finding_order, DeterministicFinding.finding_key)
+            )
+            .scalars()
+            .all()
+        )
+
+        baseline_projection = [
+            (
+                item.finding_order,
+                item.finding_key,
+                item.category,
+                item.location,
+                item.http_method,
+                item.severity,
+                item.title,
+                item.detail,
+                item.metadata_json,
+            )
+            for item in baseline_findings
+        ]
+        llm_projection = [
+            (
+                item.finding_order,
+                item.finding_key,
+                item.category,
+                item.location,
+                item.http_method,
+                item.severity,
+                item.title,
+                item.detail,
+                item.metadata_json,
+            )
+            for item in llm_findings
+        ]
+        assert baseline_projection == llm_projection
+    finally:
+        session.close()
+
+
+def test_llm_outcomes_never_mutate_main_run_status(integration_db) -> None:
+    session = integration_db()
+    try:
+        manual_review_run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        failed_run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=manual_review_run_id,
+            changelog_text="Potentially breaking updates.",
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=failed_run_id,
+            changelog_text="Potentially breaking updates.",
+        )
+    finally:
+        session.close()
+
+    manual_review_provider = _MockChangelogProvider(
+        result=ChangelogInterpretationResult(
+            summary="Needs extra review.",
+            migration_tasks=(),
+            confidence=0.2,
+            explanation="Low confidence output.",
+            requires_manual_review=False,
+            provider="mock",
+            model="mock-manual-review",
+        )
+    )
+    failed_provider = _MockChangelogProvider(error=RuntimeError("llm timeout"))
+
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+            llm_low_confidence_threshold=0.6,
+        )
+        manual_review_run = RunOrchestrationService(
+            settings=settings,
+            changelog_provider=manual_review_provider,
+        ).process_run(db=session, run_id=manual_review_run_id)
+        failed_run = RunOrchestrationService(
+            settings=settings,
+            changelog_provider=failed_provider,
+        ).process_run(db=session, run_id=failed_run_id)
+
+        assert manual_review_run.status == RunStatus.COMPLETED.value
+        assert manual_review_run.llm_status == "manual_review_required"
+        assert failed_run.status == RunStatus.COMPLETED.value
+        assert failed_run.llm_status == "failed"
+    finally:
+        session.close()

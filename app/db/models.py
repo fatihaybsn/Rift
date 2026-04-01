@@ -50,6 +50,17 @@ class RunStatus(StrEnum):
     FAILED = "failed"
 
 
+class LLMStatus(StrEnum):
+    """Optional AI changelog interpretation status values."""
+
+    NOT_REQUESTED = "not_requested"
+    DISABLED = "disabled"
+    PENDING = "pending"
+    COMPLETED = "completed"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"
+    FAILED = "failed"
+
+
 class AnalysisRun(Base):
     """Top-level analysis run metadata."""
 
@@ -58,6 +69,19 @@ class AnalysisRun(Base):
         CheckConstraint(
             "status IN ('pending', 'processing', 'completed', 'failed')",
             name="ck_analysis_runs_status",
+        ),
+        CheckConstraint(
+            (
+                "llm_status IN ("
+                "'not_requested', "
+                "'disabled', "
+                "'pending', "
+                "'completed', "
+                "'manual_review_required', "
+                "'failed'"
+                ")"
+            ),
+            name="ck_analysis_runs_llm_status",
         ),
         CheckConstraint(
             "attempt_count >= 0",
@@ -90,6 +114,22 @@ class AnalysisRun(Base):
     )
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    llm_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_migration_tasks: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    llm_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    llm_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=LLMStatus.NOT_REQUESTED.value,
+    )
+    llm_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    llm_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    llm_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     spec_artifacts: Mapped[list[SpecArtifact]] = relationship(
         back_populates="run",

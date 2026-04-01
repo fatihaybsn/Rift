@@ -35,6 +35,15 @@ EXPECTED_ANALYSIS_RUN_COLUMNS = {
     "updated_at",
     "failed_at",
     "completed_at",
+    "llm_summary",
+    "llm_migration_tasks",
+    "llm_confidence",
+    "llm_status",
+    "llm_explanation",
+    "llm_error_code",
+    "llm_provider",
+    "llm_model",
+    "llm_completed_at",
 }
 
 
