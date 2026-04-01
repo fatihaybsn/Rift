@@ -25,6 +25,7 @@ from app.db import (
 from app.services.changelog_interpreter import (
     ChangelogInterpretationResult,
     ChangelogTaskSuggestion,
+    NoLLMChangelogProvider,
 )
 from app.services.run_orchestration import (
     InProcessRunExecutor,
@@ -472,6 +473,48 @@ def test_llm_feature_flag_on_with_mock_response_persists_separate_ai_fields(inte
         assert run.llm_completed_at is not None
         assert isinstance(run.llm_migration_tasks, list)
         assert len(run.llm_migration_tasks) == 2
+    finally:
+        session.close()
+
+
+def test_llm_feature_flag_on_uses_default_no_provider_fallback(integration_db) -> None:
+    session = integration_db()
+    try:
+        run_id = _insert_run_with_specs(
+            session=session,
+            old_spec_bytes=build_valid_spec_json(title="Old API", include_patch=False),
+            new_spec_bytes=build_valid_spec_json(title="New API", include_patch=True),
+        )
+        _insert_changelog_artifact(
+            session=session,
+            run_id=run_id,
+            changelog_text="Small changelog note without deterministic authority.",
+        )
+    finally:
+        session.close()
+
+    session = integration_db()
+    try:
+        settings = Settings(
+            _env_file=None,
+            llm_changelog_interpreter_enabled=True,
+            llm_low_confidence_threshold=0.6,
+        )
+        service = RunOrchestrationService(settings=settings)
+        run = service.process_run(db=session, run_id=run_id)
+
+        assert run.status == RunStatus.COMPLETED.value
+        assert run.llm_status == "manual_review_required"
+        assert run.llm_summary == "No LLM provider configured."
+        assert run.llm_confidence == 0.0
+        assert run.llm_explanation == "AI enrichment fallback mode is active."
+        assert run.llm_provider == "none"
+        assert run.llm_model == "none"
+        assert run.llm_error_code is None
+        assert run.llm_completed_at is not None
+        assert run.llm_migration_tasks == []
+
+        assert isinstance(service._changelog_provider, NoLLMChangelogProvider)
     finally:
         session.close()
 

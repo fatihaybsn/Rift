@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "test", "staging", "production"]
@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     # Application
@@ -55,6 +56,7 @@ class Settings(BaseSettings):
     # Optional AI changelog interpretation
     llm_changelog_interpreter_enabled: bool = Field(
         default=False,
+        validation_alias=AliasChoices("ENABLE_LLM_CHANGELOG", "LLM_CHANGELOG_INTERPRETER_ENABLED"),
         description=(
             "Enable optional LLM changelog interpretation. Deterministic findings "
             "and run lifecycle state remain authoritative."

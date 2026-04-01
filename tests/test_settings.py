@@ -21,9 +21,26 @@ def test_database_url_reads_environment_override(monkeypatch: pytest.MonkeyPatch
 
 
 def test_llm_feature_flags_have_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_LLM_CHANGELOG", raising=False)
     monkeypatch.delenv("LLM_CHANGELOG_INTERPRETER_ENABLED", raising=False)
     monkeypatch.delenv("LLM_LOW_CONFIDENCE_THRESHOLD", raising=False)
 
     settings = Settings(_env_file=None)
     assert settings.llm_changelog_interpreter_enabled is False
     assert settings.llm_low_confidence_threshold == 0.6
+
+
+def test_llm_feature_flag_reads_canonical_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_LLM_CHANGELOG", "true")
+    monkeypatch.delenv("LLM_CHANGELOG_INTERPRETER_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None)
+    assert settings.llm_changelog_interpreter_enabled is True
+
+
+def test_llm_feature_flag_supports_legacy_alias_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_LLM_CHANGELOG", raising=False)
+    monkeypatch.setenv("LLM_CHANGELOG_INTERPRETER_ENABLED", "true")
+
+    settings = Settings(_env_file=None)
+    assert settings.llm_changelog_interpreter_enabled is True

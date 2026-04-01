@@ -132,9 +132,12 @@ findings, severity decisions, and `run_status` remain the source of truth.
 Enable via environment:
 
 ```bash
-LLM_CHANGELOG_INTERPRETER_ENABLED=true
+ENABLE_LLM_CHANGELOG=true
 LLM_LOW_CONFIDENCE_THRESHOLD=0.6
 ```
+
+`LLM_CHANGELOG_INTERPRETER_ENABLED` is still accepted as a legacy alias for
+backward compatibility, but `ENABLE_LLM_CHANGELOG` is the canonical contract.
 
 When enabled and changelog text exists, AI output is stored separately on the
 run/report as:
