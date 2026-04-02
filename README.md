@@ -202,6 +202,25 @@ make smoke-e2e
 The command builds the test image, starts PostgreSQL, runs `tests/test_e2e_smoke.py`,
 and then tears down containers/volumes.
 
+## Local Development & Demo
+
+To run the application using Docker Compose for local development or demo purposes:
+
+```bash
+docker compose up -d app
+```
+
+This will run database migrations and start the fastAPI application on `http://localhost:8000`.
+
+To exercise the complete demo flow using `curl` and internal CLI tools, you can execute the smoke script:
+
+```bash
+chmod +x scripts/smoke.sh
+./scripts/smoke.sh
+```
+
+This script will verify the API is running, submit a new run, process it internally, and fetch the final report.
+
 ## Local observability (traces, metrics, logs)
 
 The service now includes practical MVP observability:
