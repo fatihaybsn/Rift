@@ -195,6 +195,7 @@ def test_create_analysis_run_rejects_oversized_changelog_text() -> None:
 def test_create_analysis_run_integration_persists_run_and_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("app.api.v1.runs.process_analysis_in_background", lambda run_id: None)
     test_database_url = load_test_database_url()
     assert_safe_test_database(sa.make_url(test_database_url))
     reset_target_schema(test_database_url)

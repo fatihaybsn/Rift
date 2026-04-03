@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.core.config import Settings
 from app.db import get_db_session
@@ -32,7 +33,8 @@ def _multipart_specs():
     ]
 
 
-def test_full_stack_smoke_run_to_report(integration_db) -> None:
+def test_full_stack_smoke_run_to_report(integration_db, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.api.v1.runs.process_analysis_in_background", lambda run_id: None)
     app = create_app()
     session = integration_db()
 
