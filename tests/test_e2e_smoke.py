@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.db import get_db_session
