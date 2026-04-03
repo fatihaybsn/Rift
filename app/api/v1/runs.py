@@ -7,23 +7,20 @@ import uuid
 from datetime import datetime
 from typing import Final
 
+import structlog
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
     HTTPException,
     UploadFile,
     status,
-    BackgroundTasks,
 )
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-import structlog
-
-from app.services.run_orchestration import RunOrchestrationService
-from app.db.session import get_session_factory
 
 from app.db import (
     AnalysisRun,
@@ -32,6 +29,8 @@ from app.db import (
     SpecArtifact,
     get_db_session,
 )
+from app.db.session import get_session_factory
+from app.services.run_orchestration import RunOrchestrationService
 
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 

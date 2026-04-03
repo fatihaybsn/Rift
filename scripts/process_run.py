@@ -6,10 +6,10 @@ import argparse
 import sys
 import uuid
 
-from app.db.session import get_session_factory
-from app.services.run_orchestration import RunOrchestrationService
 from app.core.config import get_settings
+from app.db.session import get_session_factory
 from app.logging import configure_logging
+from app.services.run_orchestration import RunOrchestrationService
 
 
 def main() -> None:
