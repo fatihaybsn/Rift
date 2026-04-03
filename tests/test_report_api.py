@@ -398,8 +398,7 @@ def test_get_report_demo_returns_minimal_html_summary_links_and_top_high() -> No
     assert "Parameter added" not in body
     assert f'<a href="http://testserver/api/v1/reports/{run_id}">JSON</a>' in body
     assert (
-        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">'
-        "Markdown</a>"
+        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">Markdown</a>'
     ) in body
 
 
@@ -415,8 +414,8 @@ def test_get_report_demo_escapes_dynamic_content() -> None:
         location='operation:/pets?<script>alert("x")</script>#get',
         http_method='g<et&"',
         severity="high",
-        title='<b>Method removed</b>',
-        detail='Detail with <img src=x onerror=alert(1)>',
+        title="<b>Method removed</b>",
+        detail="Detail with <img src=x onerror=alert(1)>",
         metadata_json={"code": '<code&"', "compatibility": "breaking"},
     )
     fake_session = FakeReadSession(run=run, findings=[finding], migration_tasks=[])
@@ -453,8 +452,7 @@ def test_get_demo_runs_route_returns_same_minimal_html() -> None:
     assert "<h2>Top High-Severity Findings</h2>" in body
     assert f'<a href="http://testserver/api/v1/reports/{run_id}">JSON</a>' in body
     assert (
-        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">'
-        "Markdown</a>"
+        f'<a href="http://testserver/api/v1/reports/{run_id}?format=markdown">Markdown</a>'
     ) in body
 
 

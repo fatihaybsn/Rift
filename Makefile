@@ -32,9 +32,9 @@ format:
 check: lint test
 
 smoke-e2e:
-	@docker compose up --build --abort-on-container-exit --exit-code-from test test; \
+	@docker compose -f docker-compose.dev.yml up --build --abort-on-container-exit --exit-code-from test test; \
 	code=$$?; \
-	docker compose down --volumes --remove-orphans; \
+	docker compose -f docker-compose.dev.yml down --volumes --remove-orphans; \
 	exit $$code
 
 clean:

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  quality-and-test:
+    name: Code Quality & Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: radar
+          POSTGRES_PASSWORD: radar
+          POSTGRES_DB: api_change_radar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://radar:radar@localhost:5432/api_change_radar
+      TEST_POSTGRES_DATABASE_URL: postgresql+psycopg://radar:radar@localhost:5432/api_change_radar_test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Check code formatting
+        run: ruff format --check .
+
+      - name: Run linter
+        run: make lint
+
+      - name: Create test database
+        run: |
+          python -c 'import sqlalchemy as sa; e=sa.create_engine("postgresql+psycopg://radar:radar@localhost:5432/postgres"); c=e.connect(); c.execution_options(isolation_level="AUTOCOMMIT").execute(sa.text("CREATE DATABASE api_change_radar_test")); c.close(); e.dispose()'
+
+      - name: Migration check
+        run: alembic upgrade head
+
+      - name: Run unit & integration tests
+        run: make test
+
+  docker-and-smoke:
+    name: Container Build & Smoke
+    needs: quality-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build container
+        run: docker compose -f docker-compose.dev.yml build app
+
+      - name: Start local stack
+        run: docker compose -f docker-compose.dev.yml up -d app db
+
+      - name: Run smoke test
+        run: |
+          chmod +x scripts/smoke.sh
+          ./scripts/smoke.sh

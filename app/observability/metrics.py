@@ -64,4 +64,3 @@ def collect_metrics_payload() -> bytes:
 def metrics_content_type() -> str:
     """Return Prometheus content type."""
     return CONTENT_TYPE_LATEST
-

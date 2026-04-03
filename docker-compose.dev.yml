@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: radar
+      POSTGRES_PASSWORD: radar
+      POSTGRES_DB: api_change_radar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radar -d api_change_radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fatihayibasan/api-change-radar:dev
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: api-change-radar
+      ENVIRONMENT: development
+      DEBUG: "false"
+      DOCS_ENABLED: "true"
+      LOG_LEVEL: INFO
+      TRACING_EXPORTER: none
+      DATABASE_URL: postgresql+psycopg://radar:radar@db:5432/api_change_radar
+
+volumes:
+  db-data:

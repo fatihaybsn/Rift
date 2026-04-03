@@ -59,4 +59,3 @@ def instrument_fastapi(app: FastAPI) -> None:
 def get_tracer(name: str):
     """Return named tracer bound to current provider."""
     return trace.get_tracer(name)
-

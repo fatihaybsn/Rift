@@ -57,4 +57,3 @@ def deferred_parameter_style_spec() -> dict[str, Any]:
             }
         },
     }
-

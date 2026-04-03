@@ -7,10 +7,23 @@ import uuid
 from datetime import datetime
 from typing import Final
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+    BackgroundTasks,
+)
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+import structlog
+
+from app.services.run_orchestration import RunOrchestrationService
+from app.db.session import get_session_factory
 
 from app.db import (
     AnalysisRun,
@@ -146,8 +159,21 @@ def _build_text_artifact(run_id: uuid.UUID, changelog_text: str) -> SpecArtifact
     )
 
 
+def process_analysis_in_background(run_id: uuid.UUID) -> None:
+    """Background task to fully process a pending run."""
+    logger = structlog.get_logger()
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        try:
+            logger.info("background_processing_started", run_id=str(run_id))
+            RunOrchestrationService().process_run(db=session, run_id=run_id)
+        except Exception as e:
+            logger.exception("background_processing_failed", run_id=str(run_id), error=str(e))
+
+
 @runs_router.post("", status_code=status.HTTP_201_CREATED, response_model=RunCreateResponse)
 async def create_analysis_run(
+    background_tasks: BackgroundTasks,
     specs: list[UploadFile] = SPEC_FILES_FIELD,
     changelog_text: str | None = CHANGELOG_TEXT_FIELD,
     db: Session = DB_SESSION_DEP,
@@ -204,6 +230,7 @@ async def create_analysis_run(
         for upload_file in specs:
             await upload_file.close()
 
+    background_tasks.add_task(process_analysis_in_background, run.id)
     return RunCreateResponse(run_id=run.id, status=run.status)
 
 

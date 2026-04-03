@@ -482,9 +482,9 @@ def _render_report_demo_html(
 
     lines = [
         "<!doctype html>",
-        "<html lang=\"en\">",
+        '<html lang="en">',
         "<head>",
-        "  <meta charset=\"utf-8\" />",
+        '  <meta charset="utf-8" />',
         f"  <title>API Change Radar Demo Report {report_id_text}</title>",
         "</head>",
         "<body>",
@@ -551,8 +551,8 @@ def _render_report_demo_html(
             "    <section>",
             "      <h2>Raw Report Links</h2>",
             "      <ul>",
-            f"        <li><a href=\"{raw_json_href_text}\">JSON</a></li>",
-            f"        <li><a href=\"{raw_markdown_href_text}\">Markdown</a></li>",
+            f'        <li><a href="{raw_json_href_text}">JSON</a></li>',
+            f'        <li><a href="{raw_markdown_href_text}">Markdown</a></li>',
             "      </ul>",
             "    </section>",
             "  </main>",
@@ -637,4 +637,3 @@ def get_report(
             media_type="text/markdown",
         )
     return response_payload
-

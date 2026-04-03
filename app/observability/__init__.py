@@ -17,4 +17,3 @@ __all__ = [
     "record_run_failure",
     "record_run_success",
 ]
-
